@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>MediaVault — Il tuo aggregatore personale</title>
+
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#0d0f14">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="MediaVault">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="application-name" content="MediaVault">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+
+  <!-- SEO -->
+  <meta name="description" content="Aggrega e organizza foto, video e link dai social media in un unico posto.">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,400&display=swap" rel="stylesheet">
+
+  <!-- Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ═══════════════════════════════════════════════════════════
+       SIDEBAR
+  ═════════════════════════════════════════════════════════════ -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <div class="logo-icon">MV</div>
+      <h1>MediaVault</h1>
+    </div>
+
+    <!-- Main nav -->
+    <span class="nav-section-label">Principale</span>
+
+    <div class="nav-item active" data-page="all" onclick="navigate('all')">
+      <i class="fas fa-th-large"></i>
+      Tutti i media
+      <span class="badge" id="badge-all">0</span>
+    </div>
+
+    <div class="nav-item" data-page="favorites" onclick="navigate('favorites')">
+      <i class="fas fa-star"></i>
+      Preferiti
+      <span class="badge" id="badge-favs">0</span>
+    </div>
+
+    <div class="nav-divider"></div>
+
+    <!-- Platform filters -->
+    <span class="nav-section-label">Piattaforme</span>
+    <div id="sidebar-platforms"></div>
+
+    <div class="nav-divider"></div>
+
+    <!-- Category filters -->
+    <span class="nav-section-label">Categorie</span>
+    <div id="sidebar-categories"></div>
+
+    <div class="nav-divider"></div>
+
+    <!-- Settings & other -->
+    <span class="nav-section-label">App</span>
+
+    <div class="nav-item" data-page="settings" onclick="navigate('settings')">
+      <i class="fas fa-cog"></i>
+      Impostazioni
+    </div>
+
+    <div id="pwa-install-btn" class="nav-item" style="display:none;color:var(--accent)">
+      <i class="fas fa-download"></i>
+      Installa app
+    </div>
+
+    <!-- Sync indicator -->
+    <div style="padding: 16px 20px 0; display:flex; align-items:center; gap:8px">
+      <div class="sync-indicator" id="sync-indicator" title="Stato sincronizzazione"></div>
+      <span style="font-size:0.72rem;color:var(--text-400)">MediaVault</span>
+    </div>
+  </aside>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       MAIN AREA
+  ═════════════════════════════════════════════════════════════ -->
+  <main class="main">
+
+    <!-- Header -->
+    <header class="header">
+      <span class="header-title" id="page-header-title">MediaVault</span>
+
+      <div class="header-search">
+        <i class="fas fa-search"></i>
+        <input type="search" id="search-input" placeholder="Cerca titolo, hashtag, URL… (Ctrl+K)">
+      </div>
+
+      <div class="header-actions">
+        <button class="btn-icon" onclick="openAddModal()" title="Aggiungi link (/)">
+          <i class="fas fa-plus"></i>
+        </button>
+        <button class="btn-icon" onclick="StorageManager.exportDB()" title="Esporta DB">
+          <i class="fas fa-file-export"></i>
+        </button>
+        <div class="view-toggle">
+          <button class="view-btn active" id="view-grid" title="Griglia">
+            <i class="fas fa-th"></i>
+          </button>
+          <button class="view-btn" id="view-list" title="Lista">
+            <i class="fas fa-list"></i>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Content -->
+    <div class="content">
+
+      <!-- ── Content area (home/favorites) ── -->
+      <div id="content-area">
+        <div class="section-header">
+          <h2 class="section-title" id="section-title">Tutti i media</h2>
+          <span class="section-count" id="section-count">0 elementi</span>
+        </div>
+
+        <div class="cards-grid" id="cards-grid">
+          <!-- Cards rendered by JS -->
+        </div>
+      </div>
+
+      <!-- ── Settings area ── -->
+      <div id="settings-area" style="display:none">
+
+        <!-- Stats -->
+        <div class="section-header">
+          <h2 class="section-title">Statistiche</h2>
+        </div>
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-number" id="stat-total">0</div>
+            <div class="stat-label">Totale</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-number" id="stat-favs">0</div>
+            <div class="stat-label">Preferiti</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-number" id="stat-videos">0</div>
+            <div class="stat-label">Video</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-number" id="stat-images">0</div>
+            <div class="stat-label">Post</div>
+          </div>
+        </div>
+
+        <!-- Redis settings -->
+        <div class="settings-section">
+          <h3><i class="fas fa-database"></i> Upstash Redis</h3>
+          <p style="font-size:0.8rem;color:var(--text-400);margin-bottom:16px;line-height:1.6">
+            Configura un database Redis gratuito su <a href="https://upstash.com" target="_blank" style="color:var(--accent)">upstash.com</a> per sincronizzare i dati tra dispositivi. Crea un database Redis, poi copia l'endpoint REST URL e il token.
+          </p>
+
+          <div class="form-group">
+            <label class="form-label">Redis REST URL</label>
+            <input type="url" id="redis-url" class="form-input" placeholder="https://xxxxxxxx.upstash.io">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Redis Token (Bearer)</label>
+            <input type="password" id="redis-token" class="form-input" placeholder="AXxxxxxxxxxxxxxxxxxx">
+          </div>
+
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px">
+            <div class="redis-status" id="redis-connection-status">
+              <i class="fas fa-circle" style="font-size:0.5rem"></i> Non configurato
+            </div>
+            <button class="btn-secondary" onclick="saveSettings()"><i class="fas fa-save"></i> Salva</button>
+            <button class="btn-secondary" id="test-redis-btn" onclick="testRedisConnection()"><i class="fas fa-plug"></i> Test connessione</button>
+            <button class="btn-secondary" id="sync-redis-btn" onclick="syncFromRedis()"><i class="fas fa-cloud-download-alt"></i> Sincronizza da Redis</button>
+          </div>
+        </div>
+
+        <!-- Import / Export -->
+        <div class="settings-section">
+          <h3><i class="fas fa-exchange-alt"></i> Import / Export</h3>
+          <div class="settings-row">
+            <div>
+              <div class="settings-row-label">Esporta database</div>
+              <div class="settings-row-desc">Scarica tutti i dati come file JSON</div>
+            </div>
+            <button class="btn-secondary" onclick="StorageManager.exportDB()">
+              <i class="fas fa-download"></i> Esporta
+            </button>
+          </div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-row-label">Importa database</div>
+              <div class="settings-row-desc">Importa da un backup JSON precedente</div>
+            </div>
+            <button class="btn-secondary" onclick="triggerImport()">
+              <i class="fas fa-upload"></i> Importa
+            </button>
+          </div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-row-label" style="color:var(--accent2)">Cancella tutto</div>
+              <div class="settings-row-desc">Rimuove tutti i dati salvati</div>
+            </div>
+            <button class="btn-secondary" style="color:var(--accent2);border-color:rgba(255,107,107,0.3)" onclick="clearAllData()">
+              <i class="fas fa-trash"></i> Cancella
+            </button>
+          </div>
+          <input type="file" id="import-file" accept=".json" style="display:none" onchange="handleImport(event)">
+        </div>
+
+        <!-- About -->
+        <div class="settings-section">
+          <h3><i class="fas fa-info-circle"></i> Informazioni</h3>
+          <div class="settings-row">
+            <div>
+              <div class="settings-row-label">MediaVault</div>
+              <div class="settings-row-desc">Versione 1.0 · PWA · Open Source</div>
+            </div>
+          </div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-row-label">Servizi esterni utilizzati</div>
+              <div class="settings-row-desc">
+                Microlink.io (metadati) · AllOrigins (proxy) · 
+                YouTube/Instagram/Vimeo/TikTok (embed nativi) · 
+                Upstash Redis (cloud storage opzionale)
+              </div>
+            </div>
+          </div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-row-label">Come hostare</div>
+              <div class="settings-row-desc">
+                Carica tutti i file su un repository GitHub e abilita GitHub Pages 
+                (Settings → Pages → Deploy from branch: main).
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /settings-area -->
+
+    </div><!-- /content -->
+  </main>
+
+</div><!-- /app -->
+
+<!-- ═══════════════════════════════════════════════════════════════
+     FAB (mobile hidden, desktop visible)
+═══════════════════════════════════════════════════════════════ -->
+<button class="fab" onclick="openAddModal()" title="Aggiungi media">
+  <i class="fas fa-plus"></i>
+</button>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     BOTTOM NAV (mobile)
+═══════════════════════════════════════════════════════════════ -->
+<nav class="bottom-nav">
+  <div class="bottom-nav-item active" data-page="all" onclick="navigate('all')">
+    <i class="fas fa-th-large"></i>
+    <span>Tutti</span>
+  </div>
+  <div class="bottom-nav-item" data-page="favorites" onclick="navigate('favorites')">
+    <i class="fas fa-star"></i>
+    <span>Preferiti</span>
+  </div>
+  <div class="bottom-nav-item add-btn" onclick="openAddModal()">
+    <i class="fas fa-plus" style="font-size:1.2rem"></i>
+  </div>
+  <div class="bottom-nav-item" data-page="search" onclick="document.getElementById('search-input').focus()">
+    <i class="fas fa-search"></i>
+    <span>Cerca</span>
+  </div>
+  <div class="bottom-nav-item" data-page="settings" onclick="navigate('settings')">
+    <i class="fas fa-cog"></i>
+    <span>Settings</span>
+  </div>
+</nav>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     MODAL — Aggiungi / Modifica
+═══════════════════════════════════════════════════════════════ -->
+<div class="modal-overlay" id="add-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" id="modal-title">Aggiungi media</span>
+      <button class="modal-close" onclick="closeAddModal()"><i class="fas fa-times"></i></button>
+    </div>
+    <div class="modal-body">
+
+      <!-- URL input + analyze -->
+      <div class="form-group">
+        <label class="form-label">URL</label>
+        <div class="url-input-group">
+          <input type="url" id="url-input" class="form-input" placeholder="https://youtube.com/watch?v=...  o  instagram.com/p/...">
+          <button class="btn-analyze" id="analyze-btn" onclick="analyzeUrl()">
+            <i class="fas fa-search"></i> Analizza
+          </button>
+        </div>
+        <div class="analyze-progress" id="analyze-progress"></div>
+      </div>
+
+      <!-- Preview -->
+      <div class="url-preview" id="url-preview">
+        <img class="url-preview-thumb" id="preview-thumb" src="" alt="">
+        <div class="url-preview-info">
+          <div class="url-preview-platform" id="preview-platform"></div>
+          <div class="url-preview-title" id="preview-title"></div>
+          <div class="url-preview-desc" id="preview-desc"></div>
+        </div>
+      </div>
+
+      <!-- Title -->
+      <div class="form-group">
+        <label class="form-label">Titolo</label>
+        <input type="text" id="post-title" class="form-input" placeholder="Titolo del contenuto">
+      </div>
+
+      <!-- Description -->
+      <div class="form-group">
+        <label class="form-label">Descrizione <span style="color:var(--text-400);font-size:0.7rem;text-transform:none;letter-spacing:0">(opzionale)</span></label>
+        <textarea id="post-desc" class="form-input" rows="2" placeholder="Note aggiuntive..."></textarea>
+      </div>
+
+      <!-- Categories -->
+      <div class="form-group">
+        <label class="form-label">Categorie <span style="color:var(--accent);font-size:0.7rem;text-transform:none;letter-spacing:0">auto-rilevate</span></label>
+        <div class="cat-selector" id="cat-selector"></div>
+      </div>
+
+      <!-- Hashtags -->
+      <div class="form-group">
+        <label class="form-label">Hashtag <span style="color:var(--text-400);font-size:0.7rem;text-transform:none;letter-spacing:0">premi Invio o virgola per aggiungere</span></label>
+        <div class="tags-input-wrap" id="tags-wrap">
+          <input type="text" class="tags-input" id="tags-input" placeholder="sport, viaggio, tech...">
+        </div>
+      </div>
+
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeAddModal()">Annulla</button>
+      <button class="btn-primary" id="save-btn" onclick="savePost()" style="margin-left:auto">
+        <i class="fas fa-save"></i> Salva
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     MEDIA VIEWER
+═══════════════════════════════════════════════════════════════ -->
+<div class="viewer-overlay" id="viewer-overlay">
+  <div class="viewer-top-bar">
+    <button class="btn-icon" onclick="closeViewer()" title="Chiudi (Esc)">
+      <i class="fas fa-arrow-left"></i>
+    </button>
+    <span class="viewer-title" id="viewer-title"></span>
+    <div style="display:flex;gap:8px">
+      <button class="btn-icon" id="viewer-fav-btn" title="Preferiti">
+        <i class="far fa-star"></i>
+      </button>
+      <button class="btn-icon" id="viewer-open-btn" title="Apri originale">
+        <i class="fas fa-external-link-alt"></i>
+      </button>
+    </div>
+  </div>
+  <div class="viewer-content" id="viewer-content"></div>
+</div>
+
+<!-- Toast container -->
+<div class="toast-container" id="toast-container"></div>
+
+<!-- Scripts -->
+<script src="js/storage.js"></script>
+<script src="js/detector.js"></script>
+<script src="js/categorizer.js"></script>
+<script src="js/app.js"></script>
+
+</body>
+</html>
