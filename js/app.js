@@ -584,81 +584,107 @@ async function toggleFavorite(id) {
 }
 
 // ─── Media Viewer ─────────────────────────────────────────────────────────────
+let _viewerCurrentPost = null;
+
 function openViewer(id) {
   const post = State.posts.find(p => p.id === id);
   if (!post) return;
+  _viewerCurrentPost = post;
 
   const viewer = document.getElementById('viewer-overlay');
   document.getElementById('viewer-title').textContent = post.title || extractDomain(post.url);
 
+  // Wire up top-bar buttons
+  document.getElementById('viewer-open-btn').onclick = () => window.open(post.url, '_blank', 'noopener');
+  document.getElementById('viewer-fav-btn').onclick = () => toggleFavorite(post.id);
+  const favIcon = document.getElementById('viewer-fav-btn').querySelector('i');
+  favIcon.className = post.favorite ? 'fas fa-star' : 'far fa-star';
+
   const content = document.getElementById('viewer-content');
   content.innerHTML = '';
 
+  const isVideoType = ['video', 'audio'].includes(post.mediaType) ||
+    ['youtube', 'tiktok', 'instagram', 'twitter', 'vimeo', 'reddit', 'facebook', 'video'].includes(post.platform) ||
+    post.url.match(/\.(mp4|webm|mov|ogg|m3u8)(\?.*)?$/i);
+
+  // Image: show directly
+  if (post.mediaType === 'image' || post.platform === 'image') {
+    content.innerHTML = `
+      <div style="text-align:center">
+        <img src="${post.url}" alt="${escHtml(post.title || '')}"
+             style="max-height:80vh;max-width:100%;object-fit:contain;border-radius:var(--radius-sm)">
+      </div>`;
+    viewer.classList.add('open');
+    return;
+  }
+
+  // Spotify: always embed (no video stream)
+  if (post.platform === 'spotify') {
+    _renderEmbedFallback(post, content);
+    viewer.classList.add('open');
+    return;
+  }
+
+  // Video/social: try Cobalt direct player first
+  if (isVideoType) {
+    // Register fallback callback used by player.js
+    window._viewerFallbackEmbed = (p) => _renderEmbedFallback(p, document.getElementById('viewer-content'));
+    VideoPlayer.open(post, content);
+    viewer.classList.add('open');
+    return;
+  }
+
+  // Generic link: show OG preview
+  _renderLinkPreview(post, content);
+  viewer.classList.add('open');
+}
+
+function _renderEmbedFallback(post, content) {
   if (post.embedUrl) {
+    content.innerHTML = '';
     const iframe = document.createElement('iframe');
     iframe.src = post.embedUrl;
     iframe.allowFullscreen = true;
-    iframe.allow = 'autoplay; encrypted-media; fullscreen';
+    iframe.allow = 'autoplay; encrypted-media; fullscreen; picture-in-picture';
+    iframe.style.cssText = 'width:100%;aspect-ratio:16/9;border:none;border-radius:var(--radius);';
     content.appendChild(iframe);
-  } else if (post.mediaType === 'image' || post.platform === 'image') {
-    const img = document.createElement('img');
-    img.src = post.url;
-    img.alt = post.title || '';
-    content.appendChild(img);
-  } else if (post.platform === 'video' || post.url.match(/\.(mp4|webm|mov|ogg)(\?.*)?$/i)) {
-    const video = document.createElement('video');
-    video.src = post.url;
-    video.controls = true;
-    video.autoplay = false;
-    content.appendChild(video);
   } else if (post.platform === 'twitter') {
-    // Twitter/X embed via blockquote
-    const div = document.createElement('div');
-    div.className = 'twitter-embed';
-    div.innerHTML = `
-      <blockquote class="twitter-tweet" data-theme="dark">
-        <a href="${post.url}"></a>
-      </blockquote>
-      <div style="padding:20px;text-align:center">
-        <a href="${post.url}" target="_blank" class="btn-primary" style="display:inline-flex">
-          <i class="fab fa-twitter"></i> Apri su X/Twitter
-        </a>
-      </div>
-    `;
-    content.appendChild(div);
-    // Load twitter widget
-    if (!document.querySelector('script[src*="twitter"]')) {
-      const s = document.createElement('script');
-      s.src = 'https://platform.twitter.com/widgets.js';
-      s.async = true;
-      document.head.appendChild(s);
-    } else if (window.twttr) {
-      window.twttr.widgets.load(div);
-    }
-  } else {
-    // Fallback: link + thumbnail
     content.innerHTML = `
-      <div style="text-align:center;padding:40px 20px">
-        ${post.thumbnail ? `<img src="${post.thumbnail}" style="max-height:300px;border-radius:12px;margin:0 auto 24px">` : ''}
-        <h2 style="font-family:var(--font-display);margin-bottom:12px">${escHtml(post.title || '')}</h2>
-        <p style="color:var(--text-300);margin-bottom:24px;max-width:480px;margin-left:auto;margin-right:auto">${escHtml(post.description || '')}</p>
-        <a href="${post.url}" target="_blank" rel="noopener" class="btn-primary">
-          <i class="fas fa-external-link-alt"></i> Apri originale
-        </a>
-      </div>
-    `;
+      <div class="twitter-embed">
+        <blockquote class="twitter-tweet" data-theme="dark"><a href="${post.url}"></a></blockquote>
+        <div style="padding:16px;text-align:center">
+          <a href="${post.url}" target="_blank" rel="noopener" class="btn-primary" style="display:inline-flex">
+            <i class="fab fa-x-twitter"></i> Apri su X/Twitter
+          </a>
+        </div>
+      </div>`;
+    if (!document.querySelector('script[src*="platform.twitter"]')) {
+      const s = document.createElement('script'); s.src = 'https://platform.twitter.com/widgets.js'; s.async = true; document.head.appendChild(s);
+    } else if (window.twttr) window.twttr.widgets.load(content);
+  } else {
+    _renderLinkPreview(post, content);
   }
+}
 
-  viewer.classList.add('open');
+function _renderLinkPreview(post, content) {
+  content.innerHTML = `
+    <div style="text-align:center;padding:40px 20px;max-width:560px;margin:0 auto">
+      ${post.thumbnail ? `<img src="${post.thumbnail}" style="max-height:260px;border-radius:12px;margin:0 auto 24px;object-fit:cover" onerror="this.remove()">` : ''}
+      <h2 style="font-family:var(--font-display);margin-bottom:10px;font-size:1.15rem">${escHtml(post.title || extractDomain(post.url))}</h2>
+      <p style="color:var(--text-300);margin-bottom:24px;font-size:0.875rem;line-height:1.6">${escHtml(post.description || '')}</p>
+      <a href="${post.url}" target="_blank" rel="noopener" class="btn-primary">
+        <i class="fas fa-external-link-alt"></i> Apri originale
+      </a>
+    </div>`;
 }
 
 function closeViewer() {
   document.getElementById('viewer-overlay').classList.remove('open');
-  // Stop any playing media
+  VideoPlayer.cleanup();
+  _viewerCurrentPost = null;
+  // Kill any embed iframes
   const iframe = document.querySelector('#viewer-content iframe');
-  if (iframe) { const src = iframe.src; iframe.src = ''; iframe.src = src; }
-  const video = document.querySelector('#viewer-content video');
-  if (video) { video.pause(); }
+  if (iframe) { const s = iframe.src; iframe.src = ''; iframe.src = s; }
 }
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
