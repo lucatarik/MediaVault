@@ -233,43 +233,48 @@ const VideoPlayer = (() => {
 
   async function getInstagramDirectUrl(url) {
 
-    // ── Strategia 1: uuinstagram.com ─────────────────────────────────────
-    // Sostituisce il dominio: https://www.instagram.com/reels/ID/ → https://uuinstagram.com/reels/ID/
-    // uuinstagram risponde con una pagina HTML che contiene il video CDN di IG
+    // ── Strategia 1: vxinstagram.com (powered by SnapSave API) ───────────
+    // Converte l'URL sostituendo il dominio con vxinstagram.com
+    // vxinstagram risponde con OGP tags (og:video) che puntano al video diretto
+    // Supporta: post, reels, stories, album, condivisioni
+    // Ref: https://vxinstagram.com
     try {
-      const uuUrl = url
-        .replace(/https?:\/\/(www\.)?instagram\.com/, 'https://uuinstagram.com')
+      // Normalizza il path: /reels/ → /reel/ come richiesto da vxinstagram
+      const vxUrl = url
+        .replace(/https?:\/\/(www\.)?instagram\.com/, 'https://www.vxinstagram.com')
+        .replace(/\/reels\//, '/reel/')   // vxinstagram usa /reel/ (singolare)
         .replace(/\/$/, '') + '/';
 
-      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(uuUrl)}`;
-      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(vxUrl)}`;
+      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(10000) });
       const data = await res.json();
       if (data?.contents) {
         const videoUrl = extractVideoFromHtml(data.contents);
         if (videoUrl) {
-          console.log('[IG] uuinstagram → trovato video:', videoUrl.slice(0, 80));
+          console.log('[IG] vxinstagram → trovato video:', videoUrl.slice(0, 80));
           return videoUrl;
         }
       }
-    } catch (e) { console.warn('[IG] uuinstagram fallito:', e.message); }
+    } catch (e) { console.warn('[IG] vxinstagram fallito:', e.message); }
 
-    // ── Strategia 2: instagramez.com ─────────────────────────────────────
+    // ── Strategia 2: d.vxinstagram.com (variante con post details) ───────
     try {
-      const ezUrl = url
-        .replace(/https?:\/\/(www\.)?instagram\.com/, 'https://www.instagramez.com')
+      const dvxUrl = url
+        .replace(/https?:\/\/(www\.)?instagram\.com/, 'https://www.d.vxinstagram.com')
+        .replace(/\/reels\//, '/reel/')
         .replace(/\/$/, '') + '/';
 
-      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(ezUrl)}`;
-      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(dvxUrl)}`;
+      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(10000) });
       const data = await res.json();
       if (data?.contents) {
         const videoUrl = extractVideoFromHtml(data.contents);
         if (videoUrl) {
-          console.log('[IG] instagramez → trovato video:', videoUrl.slice(0, 80));
+          console.log('[IG] d.vxinstagram → trovato video:', videoUrl.slice(0, 80));
           return videoUrl;
         }
       }
-    } catch (e) { console.warn('[IG] instagramez fallito:', e.message); }
+    } catch (e) { console.warn('[IG] d.vxinstagram fallito:', e.message); }
 
     // ── Strategia 3: og:video dalla pagina originale tramite proxy ────────
     try {
@@ -609,7 +614,7 @@ const VideoPlayer = (() => {
 
     // ── Instagram: strategia dedicata a cascata
     if (platform === 'instagram' || /instagram\.com\/reels?\/|instagram\.com\/p\/|instagram\.com\/tv\//.test(url)) {
-      document.getElementById('mv-loading-sub').textContent = 'Tentativo uuinstagram…';
+      document.getElementById('mv-loading-sub').textContent = 'Tentativo vxinstagram…';
 
       // Prova prima i proxy IG diretti
       const igDirectUrl = await getInstagramDirectUrl(url);
