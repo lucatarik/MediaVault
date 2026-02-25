@@ -6,7 +6,7 @@ const MediaDetector = (() => {
   // ─── Platform Detection ───────────────────────────────────────────────────
   const PLATFORM_PATTERNS = [
     { platform: 'youtube',   color: '#FF0000', icon: 'fab fa-youtube',    patterns: [/youtube\.com\/watch/, /youtube\.com\/shorts/, /youtu\.be\//] },
-    { platform: 'instagram', color: '#E1306C', icon: 'fab fa-instagram',  patterns: [/instagram\.com\/p\//, /instagram\.com\/reel\//, /instagram\.com\/tv\//] },
+    { platform: 'instagram', color: '#E1306C', icon: 'fab fa-instagram',  patterns: [/instagram\.com\/p\//, /instagram\.com\/reels?\//, /instagram\.com\/tv\//] },
     { platform: 'instagram-profile', color: '#833AB4', icon: 'fab fa-instagram', patterns: [/instagram\.com\/[^/]+\/?$/] },
     { platform: 'facebook',  color: '#1877F2', icon: 'fab fa-facebook',   patterns: [/facebook\.com\//, /fb\.watch\//] },
     { platform: 'twitter',   color: '#1DA1F2', icon: 'fab fa-twitter',    patterns: [/twitter\.com\//, /x\.com\//] },
@@ -54,8 +54,14 @@ const MediaDetector = (() => {
   }
 
   function extractInstagramId(url) {
-    const m = url.match(/instagram\.com\/(?:p|reel|tv)\/([A-Za-z0-9_-]+)/);
+    const m = url.match(/instagram\.com\/(?:p|reels?|tv)\/([A-Za-z0-9_-]+)/);
     return m ? m[1] : null;
+  }
+
+  function extractInstagramType(url) {
+    if (/instagram\.com\/reels?\//.test(url)) return 'reel';
+    if (/instagram\.com\/tv\//.test(url)) return 'tv';
+    return 'p';
   }
 
   function extractTikTokId(url) {
@@ -76,7 +82,11 @@ const MediaDetector = (() => {
       }
       case 'instagram': {
         const id = extractInstagramId(url);
-        return id ? `https://www.instagram.com/p/${id}/embed/` : null;
+        if (!id) return null;
+        const type = extractInstagramType(url);
+        // Reels use /reel/ embed path, posts use /p/
+        const embedPath = type === 'reel' ? 'reel' : 'p';
+        return `https://www.instagram.com/${embedPath}/${id}/embed/captioned/`;
       }
       case 'facebook': {
         return `https://www.facebook.com/plugins/post.php?href=${encodeURIComponent(url)}&show_text=true&width=500`;
@@ -219,5 +229,5 @@ const MediaDetector = (() => {
     };
   }
 
-  return { analyze, detectPlatform, extractHashtags, buildEmbedUrl, buildThumbnailUrl, extractYouTubeId };
+  return { analyze, detectPlatform, extractHashtags, buildEmbedUrl, buildThumbnailUrl, extractYouTubeId, extractInstagramId, extractInstagramType };
 })();

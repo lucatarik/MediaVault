@@ -223,7 +223,104 @@ const VideoPlayer = (() => {
     `;
   }
 
-  // ─── Player Controls ──────────────────────────────────────────────────────
+  // ─── Instagram Direct Video ───────────────────────────────────────────────
+  // Strategia a cascata:
+  // 1. ddinstagram.com — proxy che serve i video IG direttamente
+  // 2. instagramez.com — altro proxy
+  // 3. allorigins fetch della pagina IG originale (og:video)
+  // 4. Cobalt API
+  // 5. Iframe embed nativo IG
+
+  async function getInstagramDirectUrl(url) {
+
+    // ── Strategia 1: ddinstagram.com ──────────────────────────────────────
+    // Sostituisce il dominio: https://www.instagram.com/reels/ID/ → https://ddinstagram.com/reels/ID/
+    // ddinstagram risponde con una pagina HTML che ha il <video src="..."> diretto dal CDN di IG
+    try {
+      const ddUrl = url
+        .replace(/https?:\/\/(www\.)?instagram\.com/, 'https://ddinstagram.com')
+        .replace(/\/$/, '') + '/';
+
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(ddUrl)}`;
+      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
+      const data = await res.json();
+      if (data?.contents) {
+        const videoUrl = extractVideoFromHtml(data.contents);
+        if (videoUrl) {
+          console.log('[IG] ddinstagram → trovato video:', videoUrl.slice(0, 80));
+          return videoUrl;
+        }
+      }
+    } catch (e) { console.warn('[IG] ddinstagram fallito:', e.message); }
+
+    // ── Strategia 2: instagramez.com ─────────────────────────────────────
+    try {
+      const ezUrl = url
+        .replace(/https?:\/\/(www\.)?instagram\.com/, 'https://www.instagramez.com')
+        .replace(/\/$/, '') + '/';
+
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(ezUrl)}`;
+      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
+      const data = await res.json();
+      if (data?.contents) {
+        const videoUrl = extractVideoFromHtml(data.contents);
+        if (videoUrl) {
+          console.log('[IG] instagramez → trovato video:', videoUrl.slice(0, 80));
+          return videoUrl;
+        }
+      }
+    } catch (e) { console.warn('[IG] instagramez fallito:', e.message); }
+
+    // ── Strategia 3: og:video dalla pagina originale tramite proxy ────────
+    try {
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
+      const data = await res.json();
+      if (data?.contents) {
+        const videoUrl = extractVideoFromHtml(data.contents);
+        if (videoUrl) {
+          console.log('[IG] og:video diretto → trovato:', videoUrl.slice(0, 80));
+          return videoUrl;
+        }
+      }
+    } catch (e) { console.warn('[IG] og:video fallito:', e.message); }
+
+    return null;
+  }
+
+  // Estrae URL video da HTML grezzo (og:video, <video src>, oppure JSON-LD)
+  function extractVideoFromHtml(html) {
+    // 1. og:video
+    const ogVideo = html.match(/<meta[^>]+property=["']og:video["'][^>]+content=["']([^"']+)["']/i)
+                 || html.match(/<meta[^>]+content=["']([^"']+\.mp4[^"']*)["'][^>]+property=["']og:video["']/i);
+    if (ogVideo?.[1]) return decodeHtmlEntities(ogVideo[1]);
+
+    // 2. og:video:secure_url
+    const ogSecure = html.match(/<meta[^>]+property=["']og:video:secure_url["'][^>]+content=["']([^"']+)["']/i);
+    if (ogSecure?.[1]) return decodeHtmlEntities(ogSecure[1]);
+
+    // 3. <video src="...">
+    const videoSrc = html.match(/<video[^>]+src=["']([^"']+\.mp4[^"']*)["']/i);
+    if (videoSrc?.[1]) return decodeHtmlEntities(videoSrc[1]);
+
+    // 4. JSON blob con video_url o playback_url
+    const jsonMatch = html.match(/"video_url"\s*:\s*"([^"]+\.mp4[^"]*)"/);
+    if (jsonMatch?.[1]) return jsonMatch[1].replace(/\\u0026/g, '&').replace(/\\/g, '');
+
+    const playback = html.match(/"playback_url"\s*:\s*"([^"]+)"/);
+    if (playback?.[1]) return playback[1].replace(/\\u0026/g, '&').replace(/\\/g, '');
+
+    return null;
+  }
+
+  function decodeHtmlEntities(str) {
+    return str
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'");
+  }
   function togglePlay() {
     if (!videoEl) return;
     if (videoEl.paused) {
@@ -499,18 +596,46 @@ const VideoPlayer = (() => {
 
     // Build player HTML
     viewerContentEl.innerHTML = buildPlayerHTML(post);
-    showLoading('Avvio riproduzione…', 'Recupero stream diretto via Cobalt');
+    showLoading('Avvio riproduzione…', 'Recupero stream diretto…');
 
     const platform = post.platform;
     const url = post.url;
 
-    // Direct file URLs — play immediately
+    // ── File diretto (.mp4 ecc.) → play subito
     if (url.match(/\.(mp4|webm|mov|ogg|m3u8)(\?.*)?$/i)) {
       loadVideoUrl(url);
       return;
     }
 
-    // Cobalt-supported platforms
+    // ── Instagram: strategia dedicata a cascata
+    if (platform === 'instagram' || /instagram\.com\/reels?\/|instagram\.com\/p\/|instagram\.com\/tv\//.test(url)) {
+      document.getElementById('mv-loading-sub').textContent = 'Tentativo ddinstagram…';
+
+      // Prova prima i proxy IG diretti
+      const igDirectUrl = await getInstagramDirectUrl(url);
+      if (igDirectUrl) {
+        loadVideoUrl(igDirectUrl);
+        return;
+      }
+
+      // Poi prova Cobalt
+      document.getElementById('mv-loading-sub').textContent = 'Provo Cobalt…';
+      const cobaltResult = await fetchFromCobalt(url, currentQuality);
+      if (cobaltResult?.type === 'single') {
+        loadVideoUrl(cobaltResult.url);
+        return;
+      }
+      if (cobaltResult?.type === 'picker') {
+        showPicker(cobaltResult.items);
+        return;
+      }
+
+      // Tutto fallito → embed iframe nativo IG (ultimo resort)
+      showError('Stream diretto non disponibile. Usa "Usa embed" per l\'iframe Instagram.');
+      return;
+    }
+
+    // ── Cobalt per le altre piattaforme supportate
     if (isCobaltSupported(platform, url)) {
       document.getElementById('mv-loading-sub').textContent = 'Connessione a Cobalt…';
       const result = await fetchFromCobalt(url, currentQuality);
@@ -519,18 +644,16 @@ const VideoPlayer = (() => {
         loadVideoUrl(result.url);
         return;
       }
-
       if (result?.type === 'picker') {
         showPicker(result.items);
         return;
       }
 
-      // Cobalt failed → show error with fallback options
       showError('Cobalt non ha trovato uno stream per questo URL.');
       return;
     }
 
-    // Not a video platform
+    // ── Non è una piattaforma video
     showError('Questa piattaforma non supporta la riproduzione diretta.');
   }
 
