@@ -6,8 +6,8 @@ const MediaDetector = (() => {
   // ─── Platform Detection ───────────────────────────────────────────────────
   const PLATFORM_PATTERNS = [
     { platform: 'youtube',   color: '#FF0000', icon: 'fab fa-youtube',    patterns: [/youtube\.com\/watch/, /youtube\.com\/shorts/, /youtu\.be\//] },
-    { platform: 'instagram', color: '#E1306C', icon: 'fab fa-instagram',  patterns: [/instagram\.com\/p\//, /instagram\.com\/reels?\//, /instagram\.com\/tv\//] },
-    { platform: 'instagram-profile', color: '#833AB4', icon: 'fab fa-instagram', patterns: [/instagram\.com\/[^/]+\/?$/] },
+    { platform: 'instagram', color: '#E1306C', icon: 'fab fa-instagram',  patterns: [/instagram\.com\/(p|reels?|tv|stories|share)\//] },
+    { platform: 'instagram-profile', color: '#833AB4', icon: 'fab fa-instagram', patterns: [/instagram\.com\/(?!p\/|reels?\/|tv\/|stories\/|share\/)[^/]+\/?$/] },
     { platform: 'facebook',  color: '#1877F2', icon: 'fab fa-facebook',   patterns: [/facebook\.com\//, /fb\.watch\//] },
     { platform: 'twitter',   color: '#1DA1F2', icon: 'fab fa-twitter',    patterns: [/twitter\.com\//, /x\.com\//] },
     { platform: 'tiktok',    color: '#000000', icon: 'fab fa-tiktok',     patterns: [/tiktok\.com\//] },
@@ -54,7 +54,7 @@ const MediaDetector = (() => {
   }
 
   function extractInstagramId(url) {
-    const m = url.match(/instagram\.com\/(?:p|reels?|tv)\/([A-Za-z0-9_-]+)/);
+    const m = url.match(/instagram\.com\/(?:p|reels?|tv|share\/(?:p|reel))\/([A-Za-z0-9_-]+)/);
     return m ? m[1] : null;
   }
 
@@ -81,12 +81,11 @@ const MediaDetector = (() => {
         return id ? `https://player.vimeo.com/video/${id}?dnt=1` : null;
       }
       case 'instagram': {
-        const id = extractInstagramId(url);
-        if (!id) return null;
-        const type = extractInstagramType(url);
-        // Reels use /reel/ embed path, posts use /p/
-        const embedPath = type === 'reel' ? 'reel' : 'p';
-        return `https://www.instagram.com/${embedPath}/${id}/embed/captioned/`;
+        // Usa vxinstagram come embed — supporta /p/ /reel/ /reels/ /tv/ natively
+        try {
+          const u = new URL(url);
+          return `https://www.vxinstagram.com${u.pathname}`;
+        } catch { return null; }
       }
       case 'facebook': {
         return `https://www.facebook.com/plugins/post.php?href=${encodeURIComponent(url)}&show_text=true&width=500`;

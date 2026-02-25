@@ -592,18 +592,14 @@ const VideoPlayer = (() => {
 
   // ─── vxinstagram URL builder ──────────────────────────────────────────────
   // Converte qualsiasi URL Instagram nell'equivalente vxinstagram per embed iframe.
-  // vxinstagram supporta: /p/ /reel/ /reels/ /tv/ /stories/ /share/
+  // vxinstagram supporta tutti i path originali: /p/ /reel/ /reels/ /tv/ /stories/ /share/
+  // NON serve normalizzare il path — /reels/ funziona direttamente.
   function buildVxInstagramUrl(url) {
     try {
       const u = new URL(url);
       if (!u.hostname.includes('instagram.com')) return null;
-
-      // Normalizza il path per vxinstagram (usa /reel/ anche per /reels/)
-      const path = u.pathname
-        .replace(/\/reels\//, '/reel/')   // /reels/ID → /reel/ID
-        .replace(/\/$/, '') + '/';        // assicura trailing slash
-
-      return `https://www.vxinstagram.com${path}`;
+      // Semplice sostituzione del dominio, path invariato
+      return `https://www.vxinstagram.com${u.pathname}`;
     } catch { return null; }
   }
 
@@ -629,26 +625,18 @@ const VideoPlayer = (() => {
       return;
     }
 
-    // ── Instagram: strategia dedicata a cascata
-    if (platform === 'instagram' || /instagram\.com\/reels?\/|instagram\.com\/p\/|instagram\.com\/tv\//.test(url)) {
-      document.getElementById('mv-loading-sub').textContent = 'Caricamento via vxinstagram…';
-
-      // vxinstagram è progettato per l'embedding — usalo come iframe direttamente.
-      // Evita tutti i problemi CORS che si avrebbero cercando di estrarre e riprodurre l'URL diretto.
+    // ── Instagram: usa vxinstagram come iframe diretto (no proxy, no CORS issues)
+    if (platform === 'instagram' || /instagram\.com\/(reels?|p|tv|stories|share)\//.test(url)) {
       const vxUrl = buildVxInstagramUrl(url);
       if (vxUrl) {
+        // Chiudi il player custom e carica vxinstagram come iframe
         cleanup();
         window._viewerFallbackEmbed({ ...post, embedUrl: vxUrl, _vxEmbed: true });
         return;
       }
-
-      // Fallback: Cobalt
-      document.getElementById('mv-loading-sub').textContent = 'Provo Cobalt…';
-      const cobaltResult = await fetchFromCobalt(url, currentQuality);
-      if (cobaltResult?.type === 'single') { loadVideoUrl(cobaltResult.url); return; }
-      if (cobaltResult?.type === 'picker') { showPicker(cobaltResult.items); return; }
-
-      showError('Stream non disponibile. Usa "Usa embed" per l\'iframe Instagram nativo.');
+      // Fallback: embed nativo Instagram
+      cleanup();
+      window._viewerFallbackEmbed(post);
       return;
     }
 
