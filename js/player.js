@@ -233,25 +233,25 @@ const VideoPlayer = (() => {
 
   async function getInstagramDirectUrl(url) {
 
-    // ── Strategia 1: ddinstagram.com ──────────────────────────────────────
-    // Sostituisce il dominio: https://www.instagram.com/reels/ID/ → https://ddinstagram.com/reels/ID/
-    // ddinstagram risponde con una pagina HTML che ha il <video src="..."> diretto dal CDN di IG
+    // ── Strategia 1: uuinstagram.com ─────────────────────────────────────
+    // Sostituisce il dominio: https://www.instagram.com/reels/ID/ → https://uuinstagram.com/reels/ID/
+    // uuinstagram risponde con una pagina HTML che contiene il video CDN di IG
     try {
-      const ddUrl = url
-        .replace(/https?:\/\/(www\.)?instagram\.com/, 'https://ddinstagram.com')
+      const uuUrl = url
+        .replace(/https?:\/\/(www\.)?instagram\.com/, 'https://uuinstagram.com')
         .replace(/\/$/, '') + '/';
 
-      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(ddUrl)}`;
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(uuUrl)}`;
       const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
       const data = await res.json();
       if (data?.contents) {
         const videoUrl = extractVideoFromHtml(data.contents);
         if (videoUrl) {
-          console.log('[IG] ddinstagram → trovato video:', videoUrl.slice(0, 80));
+          console.log('[IG] uuinstagram → trovato video:', videoUrl.slice(0, 80));
           return videoUrl;
         }
       }
-    } catch (e) { console.warn('[IG] ddinstagram fallito:', e.message); }
+    } catch (e) { console.warn('[IG] uuinstagram fallito:', e.message); }
 
     // ── Strategia 2: instagramez.com ─────────────────────────────────────
     try {
@@ -609,7 +609,7 @@ const VideoPlayer = (() => {
 
     // ── Instagram: strategia dedicata a cascata
     if (platform === 'instagram' || /instagram\.com\/reels?\/|instagram\.com\/p\/|instagram\.com\/tv\//.test(url)) {
-      document.getElementById('mv-loading-sub').textContent = 'Tentativo ddinstagram…';
+      document.getElementById('mv-loading-sub').textContent = 'Tentativo uuinstagram…';
 
       // Prova prima i proxy IG diretti
       const igDirectUrl = await getInstagramDirectUrl(url);
