@@ -646,7 +646,12 @@ function _renderEmbedFallback(post, content) {
     iframe.src = post.embedUrl;
     iframe.allowFullscreen = true;
     iframe.allow = 'autoplay; encrypted-media; fullscreen; picture-in-picture';
-    iframe.style.cssText = 'width:100%;aspect-ratio:16/9;border:none;border-radius:var(--radius);';
+    // vxinstagram / Instagram Reels sono verticali (9:16), gli altri 16:9
+    const isVertical = post._vxEmbed ||
+      (post.platform === 'instagram' && /reel|reels/.test(post.url));
+    iframe.style.cssText = isVertical
+      ? 'width:100%;max-width:420px;aspect-ratio:9/16;border:none;border-radius:var(--radius);display:block;margin:0 auto;'
+      : 'width:100%;aspect-ratio:16/9;border:none;border-radius:var(--radius);';
     content.appendChild(iframe);
   } else if (post.platform === 'twitter') {
     content.innerHTML = `

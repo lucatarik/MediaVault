@@ -590,6 +590,23 @@ const VideoPlayer = (() => {
     startHideControls();
   }
 
+  // ─── vxinstagram URL builder ──────────────────────────────────────────────
+  // Converte qualsiasi URL Instagram nell'equivalente vxinstagram per embed iframe.
+  // vxinstagram supporta: /p/ /reel/ /reels/ /tv/ /stories/ /share/
+  function buildVxInstagramUrl(url) {
+    try {
+      const u = new URL(url);
+      if (!u.hostname.includes('instagram.com')) return null;
+
+      // Normalizza il path per vxinstagram (usa /reel/ anche per /reels/)
+      const path = u.pathname
+        .replace(/\/reels\//, '/reel/')   // /reels/ID → /reel/ID
+        .replace(/\/$/, '') + '/';        // assicura trailing slash
+
+      return `https://www.vxinstagram.com${path}`;
+    } catch { return null; }
+  }
+
   // ─── Public API ───────────────────────────────────────────────────────────
   async function open(post, viewerContentEl) {
     currentPost = post;
@@ -614,29 +631,24 @@ const VideoPlayer = (() => {
 
     // ── Instagram: strategia dedicata a cascata
     if (platform === 'instagram' || /instagram\.com\/reels?\/|instagram\.com\/p\/|instagram\.com\/tv\//.test(url)) {
-      document.getElementById('mv-loading-sub').textContent = 'Tentativo vxinstagram…';
+      document.getElementById('mv-loading-sub').textContent = 'Caricamento via vxinstagram…';
 
-      // Prova prima i proxy IG diretti
-      const igDirectUrl = await getInstagramDirectUrl(url);
-      if (igDirectUrl) {
-        loadVideoUrl(igDirectUrl);
+      // vxinstagram è progettato per l'embedding — usalo come iframe direttamente.
+      // Evita tutti i problemi CORS che si avrebbero cercando di estrarre e riprodurre l'URL diretto.
+      const vxUrl = buildVxInstagramUrl(url);
+      if (vxUrl) {
+        cleanup();
+        window._viewerFallbackEmbed({ ...post, embedUrl: vxUrl, _vxEmbed: true });
         return;
       }
 
-      // Poi prova Cobalt
+      // Fallback: Cobalt
       document.getElementById('mv-loading-sub').textContent = 'Provo Cobalt…';
       const cobaltResult = await fetchFromCobalt(url, currentQuality);
-      if (cobaltResult?.type === 'single') {
-        loadVideoUrl(cobaltResult.url);
-        return;
-      }
-      if (cobaltResult?.type === 'picker') {
-        showPicker(cobaltResult.items);
-        return;
-      }
+      if (cobaltResult?.type === 'single') { loadVideoUrl(cobaltResult.url); return; }
+      if (cobaltResult?.type === 'picker') { showPicker(cobaltResult.items); return; }
 
-      // Tutto fallito → embed iframe nativo IG (ultimo resort)
-      showError('Stream diretto non disponibile. Usa "Usa embed" per l\'iframe Instagram.');
+      showError('Stream non disponibile. Usa "Usa embed" per l\'iframe Instagram nativo.');
       return;
     }
 
