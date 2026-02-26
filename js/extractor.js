@@ -1,77 +1,152 @@
 /**
- * extractor.js — Universal video URL extractor
- * Strategia per piattaforma:
- *   YouTube   → Invidious API (googlevideo ha CORS nativo ✅)
- *   Vimeo     → player config API via proxy HTML
- *   Reddit    → .json API (CORS nativo ✅)
- *   Instagram → vxinstagram + proxyFetch per leggere la pagina, URL diretto nel <video>
- *   TikTok / Twitter / Facebook / Twitch → Cobalt API
- *   Tutto il resto → Pyodide + yt-dlp (WASM, lazy load ~40MB)
+ * extractor.js — Universal video/audio URL extractor
+ * File: js/extractor.js
  *
- * IMPORTANTE: gli URL video vengono messi DIRETTAMENTE nel tag <video src>
- * senza passare per corsproxy.io o altri proxy video.
- * I proxy vengono usati SOLO per leggere pagine HTML/JSON.
+ * PROXY POLICY (ASSOLUTA — nessuna eccezione):
+ *   ✓ CF Worker: https://mediavault.lucatarik.workers.dev/?url=...&key=supersegreta123
+ *   ✓ allorigins: SOLO se Settings → "Usa allorigins come fallback" = attivo
+ *   ✗ corsproxy.io: MAI USATO in nessun caso
+ *
+ * PIPELINE per piattaforma:
+ *   YouTube   → [1] Invidious API (googlevideo = CORS nativo, no proxy) → [2] yt-dlp WASM
+ *   Vimeo     → [1] player config API + CF Worker → [2] yt-dlp WASM
+ *   Reddit    → [1] .json API (CORS nativo) + CF Worker → [2] Cobalt
+ *   Instagram → [1] vxinstagram + CF Worker → [2] Cobalt → [3] embedOnly
+ *   TikTok/Twitter/Facebook → [1] Cobalt + CF Worker → [2] yt-dlp WASM
+ *   Tutto il resto → yt-dlp WASM (Pyodide, lazy load ~40MB, cached)
  */
 
 const Extractor = (() => {
+  const FILE = 'extractor.js';
+  const L  = (fn, msg, d) => MV.log(FILE, fn, msg, d);
+  const W  = (fn, msg, d) => MV.warn(FILE, fn, msg, d);
+  const E  = (fn, msg, d) => MV.error(FILE, fn, msg, d);
+  const G  = (fn, t)      => MV.group(FILE, fn, t);
+  const GE = ()           => MV.groupEnd();
 
-  const LOG_PREFIX = '[extractor.js]';
-  function log(fn, msg, data) {
-    const out = `${LOG_PREFIX}[${fn}] ${msg}`;
-    if (data !== undefined) console.log(out, data); else console.log(out);
-  }
-  function warn(fn, msg, data) {
-    const out = `${LOG_PREFIX}[${fn}] ⚠ ${msg}`;
-    if (data !== undefined) console.warn(out, data); else console.warn(out);
-  }
-  function err(fn, msg, data) {
-    const out = `${LOG_PREFIX}[${fn}] ✗ ${msg}`;
-    if (data !== undefined) console.error(out, data); else console.error(out);
+  // ─── CF Worker ─────────────────────────────────────────────────────────────
+  const CF_BASE = 'https://mediavault.lucatarik.workers.dev';
+  const CF_KEY  = 'supersegreta123';
+  const cfUrl   = u => `${CF_BASE}/?url=${encodeURIComponent(u)}&key=${CF_KEY}`;
+
+  L('init', `CF Worker: ${CF_BASE}`);
+  L('init', 'POLICY PROXY: CF Worker primario. allorigins = solo se settings.useAlloriginsFallback=true. corsproxy.io = MAI.');
+
+  // ─── Proxy lists (costruite runtime in base alle impostazioni) ─────────────
+  // Ogni volta che vengono usate leggiamo le impostazioni aggiornate.
+  function buildFetchProxies() {
+    const proxies = [{ name: 'CF-Worker', build: u => cfUrl(u) }];
+    if (MV.getProxySettings().useAlloriginsFallback) {
+      L('buildFetchProxies', 'useAlloriginsFallback=true → aggiungo allorigins e codetabs');
+      proxies.push({ name: 'allorigins', build: u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}` });
+      proxies.push({ name: 'codetabs',   build: u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}` });
+    } else {
+      L('buildFetchProxies', 'useAlloriginsFallback=false → solo CF Worker');
+    }
+    return proxies;
   }
 
-  // ── CORS Proxy (solo per leggere HTML/JSON — MAI come src di <video>) ──────
-  const FETCH_PROXIES = [
-    u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
-    u => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
-    u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
-    u => `https://thingproxy.freeboard.io/fetch/${u}`,
-  ];
+  function buildVideoProxies() {
+    const proxies = [{ name: 'CF-Worker', build: u => cfUrl(u) }];
+    if (MV.getProxySettings().useAlloriginsFallback) {
+      L('buildVideoProxies', 'useAlloriginsFallback=true → aggiungo allorigins-raw');
+      proxies.push({ name: 'allorigins-raw', build: u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}` });
+    }
+    return proxies;
+  }
 
+  // ─── proxyFetch ────────────────────────────────────────────────────────────
+  // Legge HTML o JSON di una pagina bypassando CORS.
+  // Gestisce il wrapper allorigins {contents:...} e risposte dirette.
   async function proxyFetch(targetUrl, asJson = false) {
     const FN = 'proxyFetch';
-    log(FN, `Fetch di: ${targetUrl.slice(0,80)}… [modo: ${asJson?'JSON':'text'}]`);
-    for (let i = 0; i < FETCH_PROXIES.length; i++) {
-      const proxyUrl = FETCH_PROXIES[i](targetUrl);
-      log(FN, `Proxy ${i+1}/${FETCH_PROXIES.length}: ${proxyUrl.slice(0,70)}…`);
+    const proxies = buildFetchProxies();
+    G(FN, `Fetch "${targetUrl.slice(0,70)}…" [asJson=${asJson}]`);
+    L(FN, `LOGICA: provo ogni proxy (${proxies.map(p=>p.name).join(' → ')}) al primo successo restituisco`);
+
+    for (let i = 0; i < proxies.length; i++) {
+      const { name, build } = proxies[i];
+      const pUrl = build(targetUrl);
+      L(FN, `[${i+1}/${proxies.length}] "${name}" → ${pUrl.slice(0,90)}…`);
       try {
-        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(10000) });
-        log(FN, `Proxy ${i+1} → HTTP ${res.status}`);
-        if (!res.ok) { warn(FN, `Proxy ${i+1} HTTP ${res.status} — salto`); continue; }
+        const res = await fetch(pUrl, { signal: AbortSignal.timeout(10000) });
+        L(FN, `[${i+1}] "${name}" → HTTP ${res.status} ${res.statusText}`);
+        if (!res.ok) { W(FN, `[${i+1}] "${name}" HTTP ${res.status} — prossimo proxy`); continue; }
+
         const text = await res.text();
-        log(FN, `Proxy ${i+1} → ${text.length} chars ricevuti`);
+        L(FN, `[${i+1}] "${name}" → ${text.length} chars`);
+        if (text.length < 50) { W(FN, `[${i+1}] troppo corto (${text.length} chars) — prossimo`); continue; }
+
+        // Allorigins wrappa in { contents: "...", status: { http_code: 200 } }
         try {
           const j = JSON.parse(text);
           if (j?.contents) {
-            log(FN, `Proxy ${i+1} → allorigins wrapper, estraggo .contents`);
-            return asJson ? JSON.parse(j.contents) : j.contents;
+            L(FN, `[${i+1}] "${name}" → wrapper allorigins, .contents = ${j.contents.length} chars`);
+            GE(); return asJson ? safeJson(j.contents, FN) : j.contents;
           }
+          if (asJson) { L(FN, `[${i+1}] "${name}" → JSON diretto OK`); GE(); return j; }
         } catch {}
-        if (text.length > 50) {
-          log(FN, `Proxy ${i+1} → body diretto OK`);
-          return asJson ? JSON.parse(text) : text;
+
+        if (asJson) {
+          const p = safeJson(text, FN);
+          if (p) { L(FN, `[${i+1}] "${name}" → JSON parsato OK`); GE(); return p; }
+          W(FN, `[${i+1}] non è JSON — prossimo`); continue;
         }
-        warn(FN, `Proxy ${i+1} → body troppo corto (${text.length}), salto`);
-      } catch (e) { warn(FN, `Proxy ${i+1} eccezione: ${e.message}`); }
+        L(FN, `[${i+1}] "${name}" → HTML/testo OK ✓`);
+        GE(); return text;
+      } catch (e) {
+        W(FN, `[${i+1}] "${name}" → eccezione: ${e.message}`);
+      }
     }
-    err(FN, `Tutti i proxy falliti per ${targetUrl.slice(0,80)}`);
-    return null;
+    E(FN, `TUTTI i ${proxies.length} proxy falliti per "${targetUrl.slice(0,80)}"`);
+    GE(); return null;
   }
 
-  function decodeHtmlEntities(s) {
-    return (s||'').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'");
+  function safeJson(text, fn) {
+    try { return JSON.parse(text); }
+    catch (e) { W(fn||'safeJson', `JSON.parse fallito: ${e.message}`); return null; }
   }
 
-  // ── YouTube → Invidious API ────────────────────────────────────────────────
+  // ─── proxyVideoUrl ─────────────────────────────────────────────────────────
+  // Wrappa un URL video con CF Worker per fare da relay CORS al <video src>.
+  // HEAD probe per verificare il proxy prima di usarlo.
+  // Se HEAD fallisce su CF Worker (non sempre supportato) → usa comunque CF Worker.
+  async function proxyVideoUrl(rawUrl) {
+    const FN = 'proxyVideoUrl';
+    if (!rawUrl) { E(FN,'rawUrl è null/undefined'); return null; }
+    const proxies = buildVideoProxies();
+    G(FN, `Proxy video "${rawUrl.slice(0,70)}…"`);
+    L(FN, `LOGICA: wrappa URL con CORS proxy per <video src>. CF Worker è il proxy primario.`);
+    L(FN, `Proxy disponibili: [${proxies.map(p=>p.name).join(', ')}]`);
+
+    for (let i = 0; i < proxies.length; i++) {
+      const { name, build } = proxies[i];
+      const proxied = build(rawUrl);
+      L(FN, `[${i+1}/${proxies.length}] "${name}" HEAD probe…`);
+      L(FN, `[${i+1}] Proxied URL: ${proxied.slice(0,90)}…`);
+      try {
+        const probe = await fetch(proxied, { method:'HEAD', signal: AbortSignal.timeout(6000) });
+        L(FN, `[${i+1}] "${name}" HEAD → HTTP ${probe.status}`);
+        if (probe.ok || [206,301,302].includes(probe.status)) {
+          L(FN, `[${i+1}] "${name}" ✓ probe OK → uso questo proxy`);
+          GE(); return proxied;
+        }
+        W(FN, `[${i+1}] "${name}" HTTP ${probe.status} — prossimo`);
+      } catch (e) {
+        W(FN, `[${i+1}] "${name}" HEAD eccezione: ${e.message}`);
+        if (name === 'CF-Worker') {
+          L(FN, `CF-Worker: HEAD fallito (non obbligatorio) → uso l'URL comunque`);
+          GE(); return proxied;
+        }
+      }
+    }
+    W(FN, `Tutti HEAD falliti → default CF Worker`);
+    GE(); return cfUrl(rawUrl);
+  }
+
+  // ─── YOUTUBE via Invidious API ─────────────────────────────────────────────
+  // Invidious: GET /api/v1/videos/{id} → formatStreams[] (video+audio combinati).
+  // URL CDN: googlevideo.com → ha CORS nativo → nessun proxy video necessario.
   const INVIDIOUS_INSTANCES = [
     'https://inv.nadeko.net',
     'https://invidious.privacydev.net',
@@ -83,180 +158,229 @@ const Extractor = (() => {
 
   function extractYouTubeId(url) {
     const m = url.match(/(?:v=|youtu\.be\/|shorts\/|embed\/)([a-zA-Z0-9_-]{11})/);
-    log('extractYouTubeId', `URL: ${url.slice(0,60)} → ID: ${m?.[1]||'NON TROVATO'}`);
+    L('extractYouTubeId', `"${url.slice(0,60)}" → ID=${m?.[1]||'NON TROVATO'}`);
     return m ? m[1] : null;
   }
 
-  async function extractYouTube(url, quality='720', onProgress) {
+  async function extractYouTube(url, quality = '720', onProgress) {
     const FN = 'extractYouTube';
+    G(FN, `YouTube: ${url} [${quality}p]`);
+    L(FN, `LOGICA: Invidious /api/v1/videos/{id} → formatStreams[] → URL googlevideo.com (CORS nativo → no proxy video)`);
     const id = extractYouTubeId(url);
-    if (!id) { err(FN,'ID non trovato'); return null; }
-    log(FN, `ID=${id} quality=${quality}p, provo ${INVIDIOUS_INSTANCES.length} istanze Invidious`);
-    log(FN, `LOGICA: Invidious espone /api/v1/videos/{id} con formatStreams (video+audio combinati). googlevideo.com ha CORS nativo → play diretto`);
+    if (!id) { E(FN,'ID non trovato'); GE(); return null; }
+    L(FN, `Video ID: "${id}"`);
 
     for (let i = 0; i < INVIDIOUS_INSTANCES.length; i++) {
-      const instance = INVIDIOUS_INSTANCES[i];
-      const apiUrl = `${instance}/api/v1/videos/${id}`;
+      const inst = INVIDIOUS_INSTANCES[i];
+      const apiUrl = `${inst}/api/v1/videos/${id}`;
       onProgress?.(`YouTube · Invidious ${i+1}/${INVIDIOUS_INSTANCES.length}…`);
-      log(FN, `Tentativo ${i+1}: ${apiUrl}`);
+      L(FN, `[${i+1}/${INVIDIOUS_INSTANCES.length}] Istanza: ${inst}`);
+      L(FN, `[${i+1}] API: ${apiUrl}`);
       try {
         let data = null;
+        L(FN, `[${i+1}] Provo fetch diretto (alcune istanze hanno CORS aperto)…`);
         try {
-          log(FN, `Provo fetch diretto (alcune istanze hanno CORS aperto)…`);
-          const res = await fetch(apiUrl, { headers:{'Accept':'application/json'}, signal: AbortSignal.timeout(7000) });
-          if (res.ok) { data = await res.json(); log(FN, `Fetch diretto OK su ${instance}`); }
-        } catch(e) { log(FN, `Fetch diretto fallito (${e.message}), provo via proxyFetch`); }
-        if (!data) data = await proxyFetch(apiUrl, true);
-        if (!data) { warn(FN, `${instance}: nessun dato`); continue; }
+          const r = await fetch(apiUrl, { headers:{'Accept':'application/json'}, signal: AbortSignal.timeout(6000) });
+          L(FN, `[${i+1}] Fetch diretto → HTTP ${r.status}`);
+          if (r.ok) { data = await r.json(); L(FN, `[${i+1}] ✓ Fetch diretto riuscito`); }
+          else W(FN, `[${i+1}] HTTP ${r.status} → provo proxyFetch via CF Worker`);
+        } catch(e) { W(FN, `[${i+1}] Fetch diretto fallito: ${e.message} → proxyFetch`); }
 
-        log(FN, `${instance}: dati ok. formatStreams=${data.formatStreams?.length||0} adaptiveFormats=${data.adaptiveFormats?.length||0}`);
+        if (!data) {
+          L(FN, `[${i+1}] Fetch via CF Worker (proxyFetch)…`);
+          data = await proxyFetch(apiUrl, true);
+        }
+        if (!data) { W(FN, `[${i+1}] Nessun dato da ${inst} → prossima istanza`); continue; }
+
+        L(FN, `[${i+1}] Dati ricevuti: title="${data.title?.slice(0,40)}" formatStreams=${data.formatStreams?.length||0} adaptiveFormats=${data.adaptiveFormats?.length||0}`);
         const streams = (data.formatStreams||[]).filter(f=>f.url && f.type?.includes('video'));
+        L(FN, `[${i+1}] formatStreams video+audio: ${streams.length}`);
+        streams.forEach((s,idx) => L(FN, `  [${idx}] quality=${s.quality} container=${s.container}`));
+
         const qNum = parseInt(quality);
         const best = streams.sort((a,b)=>Math.abs((parseInt(a.quality)||0)-qNum)-Math.abs((parseInt(b.quality)||0)-qNum))[0]
           || data.adaptiveFormats?.find(f=>f.url && f.type?.includes('video'));
 
         if (best?.url) {
-          log(FN, `✓ Stream trovato: quality=${best.quality||'?'} url=${best.url.slice(0,80)}…`);
-          log(FN, `NOTA: URL googlevideo.com → CORS nativo → <video src> diretto, NO proxy video`);
-          return { url: best.url, quality: best.quality };
+          L(FN, `✓ SCELTO: quality=${best.quality||'?'} container=${best.container||'?'}`);
+          L(FN, `URL googlevideo.com (CORS nativo → <video src> diretto, NO CF Worker): ${best.url.slice(0,100)}…`);
+          GE(); return { url: best.url, quality: best.quality, needsProxy: false };
         }
-        warn(FN, `${instance}: nessun stream usabile`);
-      } catch(e) { warn(FN, `${instance} eccezione: ${e.message}`); }
+        W(FN, `[${i+1}] Nessuno stream usabile su ${inst}`);
+      } catch(e) { E(FN, `[${i+1}] Eccezione: ${e.message}`); }
     }
-    err(FN, `Tutte le istanze Invidious fallite`);
-    return null;
+    E(FN, `TUTTE le ${INVIDIOUS_INSTANCES.length} istanze Invidious fallite`);
+    GE(); return null;
   }
 
-  // ── Vimeo → player config API ─────────────────────────────────────────────
+  // ─── VIMEO via player config API ──────────────────────────────────────────
+  // GET player.vimeo.com/video/{id}/config → progressive[] (video+audio CDN).
+  // CDN akamaized.net blocca CORS → CF Worker relay.
   function extractVimeoId(url) {
     const m = url.match(/vimeo\.com\/(?:video\/)?(\d+)/);
-    log('extractVimeoId', `ID: ${m?.[1]||'NON TROVATO'}`);
+    L('extractVimeoId', `ID=${m?.[1]||'NON TROVATO'}`);
     return m ? m[1] : null;
   }
 
-  async function extractVimeo(url, quality='720', onProgress) {
+  async function extractVimeo(url, quality = '720', onProgress) {
     const FN = 'extractVimeo';
+    G(FN, `Vimeo: ${url} [${quality}p]`);
+    L(FN, `LOGICA: GET player.vimeo.com/video/{id}/config via CF Worker → progressive[] → CF Worker relay`);
     const id = extractVimeoId(url);
-    if (!id) { err(FN,'ID non trovato'); return null; }
+    if (!id) { E(FN,'ID non trovato'); GE(); return null; }
+
     const configUrl = `https://player.vimeo.com/video/${id}/config`;
     onProgress?.('Vimeo · config API…');
-    log(FN, `LOGICA: /config contiene progressive[] (video+audio combinati). vod-progressive.akamaized.net ha CORS → play diretto`);
-    log(FN, `Chiamo: ${configUrl}`);
-
+    L(FN, `Config URL: ${configUrl}`);
+    L(FN, `Fetch config via proxyFetch (CF Worker)…`);
     const data = await proxyFetch(configUrl, true);
-    if (!data) { err(FN,'Nessuna risposta config'); return null; }
+    if (!data) { E(FN,'Nessuna risposta dalla config API'); GE(); return null; }
 
+    L(FN, `Config ricevuta. request.files keys: ${JSON.stringify(Object.keys(data?.request?.files||{}))}`);
     const progressive = (data?.request?.files?.progressive||[]).filter(f=>f.url);
-    log(FN, `progressive[] trovati: ${progressive.length}`);
+    L(FN, `progressive[] usabili: ${progressive.length}`);
+    progressive.forEach((p,i)=>L(FN, `  [${i}] ${p.quality}p → ${p.url?.slice(0,60)}…`));
+
     if (progressive.length) {
       const qNum = parseInt(quality);
       const best = progressive.sort((a,b)=>Math.abs((a.quality||0)-qNum)-Math.abs((b.quality||0)-qNum))[0];
-      log(FN, `✓ Progressive: ${best.quality}p → ${best.url.slice(0,80)}…`);
-      log(FN, `NOTA: URL CDN Vimeo → play diretto, NO proxy video`);
-      return { url: best.url, quality: `${best.quality}p` };
+      L(FN, `✓ SCELTO: ${best.quality}p`);
+      L(FN, `CDN Vimeo blocca CORS → CF Worker relay…`);
+      const proxied = await proxyVideoUrl(best.url);
+      L(FN, `URL finale proxato: ${proxied?.slice(0,80)}…`);
+      GE(); return { url: proxied, quality: `${best.quality}p`, needsProxy: true };
     }
 
     const hls = data?.request?.files?.hls?.cdns;
     if (hls) {
       const cdn = Object.values(hls)[0];
-      if (cdn?.url) { log(FN, `✓ HLS: ${cdn.url.slice(0,80)}`); return { url: cdn.url }; }
+      if (cdn?.url) {
+        L(FN, `Nessun progressive → HLS fallback: ${cdn.url.slice(0,60)}`);
+        const proxied = await proxyVideoUrl(cdn.url);
+        GE(); return { url: proxied, needsProxy: true };
+      }
     }
-    err(FN, 'Nessun formato trovato');
-    return null;
+    E(FN,'Nessun formato (né progressive né HLS)'); GE(); return null;
   }
 
-  // ── Reddit → .json API ───────────────────────────────────────────────────
+  // ─── REDDIT via .json API ─────────────────────────────────────────────────
+  // reddit.com ha CORS nativo per GET anonimi.
+  // media.reddit_video.fallback_url → v.redd.it → CF Worker relay.
   async function extractReddit(url, onProgress) {
     const FN = 'extractReddit';
-    const cleanUrl = url.replace(/\/$/, '').replace(/\?.*$/, '');
-    const jsonUrl = cleanUrl + '.json';
+    G(FN, `Reddit: ${url}`);
+    L(FN, `LOGICA: aggiungo .json all'URL → media.reddit_video.fallback_url → CF Worker relay`);
+    const jsonUrl = url.replace(/\/$/, '').replace(/\?.*$/,'') + '.json';
+    L(FN, `JSON endpoint: ${jsonUrl}`);
     onProgress?.('Reddit · JSON API…');
-    log(FN, `LOGICA: Reddit .json API ha CORS nativo. Cerco media.reddit_video.fallback_url (video senza audio purtroppo)`);
-    log(FN, `JSON URL: ${jsonUrl}`);
 
     let data = null;
+    L(FN, `Tentativo fetch diretto (reddit ha CORS nativo per GET anonimi)…`);
     try {
-      const res = await fetch(jsonUrl, { headers:{'Accept':'application/json'}, signal: AbortSignal.timeout(8000) });
-      if (res.ok) { data = await res.json(); log(FN,'Fetch diretto Reddit OK'); }
-    } catch(e) { warn(FN, `Fetch diretto fallito: ${e.message}`); }
-    if (!data) data = await proxyFetch(jsonUrl, true);
-    if (!data) { err(FN,'Nessun dato JSON'); return null; }
+      const r = await fetch(jsonUrl, { headers:{'Accept':'application/json'}, signal: AbortSignal.timeout(8000) });
+      L(FN, `Fetch diretto → HTTP ${r.status}`);
+      if (r.ok) { data = await r.json(); L(FN, `✓ Fetch diretto riuscito`); }
+      else W(FN, `HTTP ${r.status} → provo CF Worker`);
+    } catch(e) { W(FN, `Fetch diretto fallito: ${e.message} → CF Worker`); }
+
+    if (!data) {
+      L(FN, `Fetch via proxyFetch (CF Worker)…`);
+      data = await proxyFetch(jsonUrl, true);
+    }
+    if (!data) { E(FN,'Nessun dato JSON'); GE(); return null; }
 
     const post = Array.isArray(data) ? data[0]?.data?.children?.[0]?.data : data?.data?.children?.[0]?.data;
-    if (!post) { err(FN,'Struttura JSON inattesa'); return null; }
-    log(FN, `Post: "${post.title?.slice(0,50)}"`);
+    if (!post) { E(FN,'Post non trovato nella struttura JSON'); GE(); return null; }
+    L(FN, `Post trovato: title="${post.title?.slice(0,50)}" subreddit=${post.subreddit}`);
+    L(FN, `media keys: ${JSON.stringify(Object.keys(post.media||{}))}`);
 
     const rv = post.media?.reddit_video || post.secure_media?.reddit_video;
     if (rv?.fallback_url) {
-      const videoUrl = rv.fallback_url.replace('?source=fallback','');
-      log(FN, `✓ reddit_video fallback_url: ${videoUrl.slice(0,80)}`);
-      log(FN, `AVVISO: solo video senza audio (limitazione v.redd.it). URL diretto → NO proxy video`);
-      return { url: videoUrl, note: 'Solo video (senza audio — Reddit)' };
+      const rawUrl = rv.fallback_url.replace('?source=fallback','');
+      L(FN, `✓ reddit_video.fallback_url: ${rawUrl.slice(0,80)}`);
+      L(FN, `v.redd.it blocca CORS → CF Worker relay…`);
+      const proxied = await proxyVideoUrl(rawUrl);
+      GE(); return { url: proxied, needsProxy: true };
     }
 
-    const direct = (post.url_overridden_by_dest||post.url||'');
-    if (direct.match(/\.(mp4|webm|gifv)(\?.*)?$/i)) {
-      const final = direct.replace('.gifv','.mp4');
-      log(FN, `✓ URL diretto mp4/webm: ${final.slice(0,80)}`);
-      return { url: final };
+    const directUrl = post.url_overridden_by_dest || post.url;
+    L(FN, `Nessun reddit_video. url diretto: ${directUrl?.slice(0,80)}`);
+    if (directUrl?.match(/\.(mp4|webm|gifv)(\?.*)?$/i)) {
+      const final = directUrl.replace('.gifv','.mp4');
+      const proxied = await proxyVideoUrl(final);
+      GE(); return { url: proxied, needsProxy: true };
     }
-    err(FN, 'Nessun video trovato');
-    return null;
+    E(FN,'Nessun video trovato nel post Reddit'); GE(); return null;
   }
 
-  // ── Instagram → vxinstagram + proxyFetch ─────────────────────────────────
+  // ─── INSTAGRAM via vxinstagram ────────────────────────────────────────────
+  // Step 1: buildVxUrl() → sostituisce instagram.com con vxinstagram.com (path invariato)
+  // Step 2: proxyFetch() via CF Worker → scarica HTML con <source src="VerifySnapsaveLink?...">
+  // Step 3: extractSourceFromHtml() → estrae rawUrl
+  // Step 4: proxyVideoUrl() CF Worker → relay CORS per streaming
   function buildVxUrl(igUrl) {
+    const FN = 'buildVxUrl';
     try {
       const u = new URL(igUrl);
+      if (!u.hostname.includes('instagram.com')) { E(FN,'Non è instagram.com'); return null; }
       const vx = `https://www.vxinstagram.com${u.pathname}`;
-      log('buildVxUrl', `${igUrl.slice(0,60)} → ${vx}`);
+      L(FN, `"${igUrl.slice(0,60)}" → "${vx}"`);
       return vx;
-    } catch(e) { err('buildVxUrl', e.message); return null; }
+    } catch(e) { E(FN, `URL parse fallito: ${e.message}`); return null; }
   }
 
   function extractSourceFromHtml(html) {
     const FN = 'extractSourceFromHtml';
-    log(FN, `Analisi HTML (${html.length} chars)`);
+    L(FN, `Cerco URL video in HTML (${html.length} chars)…`);
+    L(FN, `Strategia: [1] <source src> → [2] og:video:secure_url → [3] og:video`);
+    const dec = s=>(s||'').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'");
 
     const src = html.match(/<source[^>]+src=["']([^"']+)["']/i);
-    if (src?.[1]) { const u=decodeHtmlEntities(src[1]); log(FN,`✓ <source src>: ${u.slice(0,80)}`); return u; }
+    if (src?.[1]) { L(FN, `✓ [1] <source src>: ${dec(src[1]).slice(0,80)}…`); return dec(src[1]); }
 
     const ogS = html.match(/property=["']og:video:secure_url["'][^>]*content=["']([^"']+)["']/i)
               || html.match(/content=["']([^"']+)["'][^>]*property=["']og:video:secure_url["']/i);
-    if (ogS?.[1]) { const u=decodeHtmlEntities(ogS[1]); log(FN,`✓ og:video:secure_url: ${u.slice(0,80)}`); return u; }
+    if (ogS?.[1]) { L(FN, `✓ [2] og:video:secure_url: ${dec(ogS[1]).slice(0,80)}…`); return dec(ogS[1]); }
 
     const ogV = html.match(/property=["']og:video["'][^>]*content=["']([^"']+)["']/i)
               || html.match(/content=["']([^"']+)["'][^>]*property=["']og:video["']/i);
-    if (ogV?.[1]) { const u=decodeHtmlEntities(ogV[1]); log(FN,`✓ og:video: ${u.slice(0,80)}`); return u; }
+    if (ogV?.[1]) { L(FN, `✓ [3] og:video: ${dec(ogV[1]).slice(0,80)}…`); return dec(ogV[1]); }
 
-    err(FN, 'Nessun URL trovato. Pattern cercati: <source src>, og:video:secure_url, og:video');
+    E(FN,'Nessun URL trovato (<source src>, og:video:secure_url, og:video tutti falliti)');
     return null;
   }
 
   async function extractInstagram(url, onProgress) {
     const FN = 'extractInstagram';
-    log(FN, `=== Estrazione Instagram ===`);
-    log(FN, `LOGICA: 1) converti URL in vxinstagram, 2) leggi HTML via proxyFetch, 3) estrai <source src>, 4) <video src> diretto`);
-    log(FN, `URL originale: ${url}`);
+    G(FN, `Instagram: ${url}`);
+    L(FN, `LOGICA: vxinstagram → CF Worker HTML fetch → extractSourceFromHtml → CF Worker video relay`);
 
+    L(FN, `Step 1: buildVxUrl…`);
     const vxUrl = buildVxUrl(url);
-    if (!vxUrl) { err(FN, 'buildVxUrl fallito'); return null; }
+    if (!vxUrl) { E(FN,'buildVxUrl fallito'); GE(); return null; }
+    L(FN, `Step 1 OK → vxUrl="${vxUrl}"`);
 
-    onProgress?.('Instagram · vxinstagram…');
-    log(FN, `proxyFetch su: ${vxUrl}`);
-    const html = await proxyFetch(vxUrl);
-    if (!html) { err(FN, 'proxyFetch restituito null'); return null; }
+    onProgress?.('Instagram · vxinstagram via CF Worker…');
+    L(FN, `Step 2: proxyFetch(vxUrl) tramite CF Worker…`);
+    const html = await proxyFetch(vxUrl, false);
+    if (!html) { E(FN,'Nessun HTML da proxyFetch'); GE(); return null; }
+    L(FN, `Step 2 OK → HTML: ${html.length} chars`);
 
-    log(FN, `HTML ricevuto (${html.length} chars), estraggo URL video…`);
+    L(FN, `Step 3: extractSourceFromHtml…`);
     const rawUrl = extractSourceFromHtml(html);
-    if (!rawUrl) { err(FN, 'Nessun URL estratto dall\'HTML'); return null; }
+    if (!rawUrl) { E(FN,'Nessun URL video nell\'HTML vxinstagram'); GE(); return null; }
+    L(FN, `Step 3 OK → rawUrl="${rawUrl.slice(0,100)}…"`);
 
-    log(FN, `✓ URL estratto: ${rawUrl.slice(0,100)}…`);
-    log(FN, `NOTA: URL messo DIRETTAMENTE in <video src> — NO corsproxy, NO allorigins`);
-    return { url: rawUrl };
+    onProgress?.('Instagram · CF Worker video relay…');
+    L(FN, `Step 4: proxyVideoUrl (CF Worker relay per VerifySnapsaveLink)…`);
+    const proxied = await proxyVideoUrl(rawUrl);
+    L(FN, `Step 4 OK → URL finale="${proxied?.slice(0,100)}…"`);
+    GE(); return { url: proxied, needsProxy: true };
   }
 
-  // ── Cobalt API ────────────────────────────────────────────────────────────
+  // ─── COBALT API ────────────────────────────────────────────────────────────
+  // POST /  → status: stream/redirect/tunnel → URL diretto → CF Worker relay
+  //        → status: picker → array stream disponibili
   const COBALT_INSTANCES = [
     'https://api.cobalt.tools',
     'https://cobalt.api.timelessnesses.me',
@@ -264,222 +388,310 @@ const Extractor = (() => {
     'https://co.wuk.sh',
   ];
 
-  async function extractViaCobalt(url, quality='720', onProgress) {
+  async function extractViaCobalt(url, quality = '720', onProgress) {
     const FN = 'extractViaCobalt';
-    log(FN, `=== Cobalt API ===`);
-    log(FN, `LOGICA: POST JSON con {url, videoQuality}. Risposta: stream/redirect/tunnel=URL diretto; picker=più video`);
-    log(FN, `URL: ${url}, quality: ${quality}p, istanze: ${COBALT_INSTANCES.length}`);
+    G(FN, `Cobalt: ${url} [${quality}p]`);
+    L(FN, `LOGICA: POST a istanza Cobalt → ricevo stream URL → CF Worker relay per CORS`);
+    L(FN, `Istanze disponibili: ${COBALT_INSTANCES.length} — provo in cascata`);
 
     for (let i = 0; i < COBALT_INSTANCES.length; i++) {
-      const instance = COBALT_INSTANCES[i];
+      const inst = COBALT_INSTANCES[i];
       onProgress?.(`Cobalt ${i+1}/${COBALT_INSTANCES.length}…`);
-      log(FN, `Tentativo ${i+1}: ${instance}`);
+      L(FN, `[${i+1}/${COBALT_INSTANCES.length}] POST → ${inst}`);
+      const payload = { url, videoQuality: quality, audioFormat:'mp3', filenameStyle:'basic', downloadMode:'auto', twitterGif:false };
+      L(FN, `[${i+1}] Payload:`, payload);
       try {
-        const res = await fetch(instance, {
-          method: 'POST',
-          headers: {'Accept':'application/json','Content-Type':'application/json'},
-          body: JSON.stringify({ url, videoQuality:quality, audioFormat:'mp3', filenameStyle:'basic', downloadMode:'auto', twitterGif:false }),
-          signal: AbortSignal.timeout(9000),
+        const res = await fetch(inst, {
+          method:'POST',
+          headers:{'Accept':'application/json','Content-Type':'application/json'},
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(10000),
         });
-        log(FN, `${instance} → HTTP ${res.status}`);
-        if (!res.ok) { warn(FN, `HTTP ${res.status} — salto`); continue; }
-
+        L(FN, `[${i+1}] HTTP ${res.status} ${res.statusText}`);
+        if (!res.ok) { W(FN, `[${i+1}] HTTP ${res.status} → prossima istanza`); continue; }
         const data = await res.json();
-        log(FN, `Risposta Cobalt: status="${data.status}"`, data.url ? {url: data.url.slice(0,80)} : '');
+        L(FN, `[${i+1}] Risposta:`, { status: data.status, hasUrl: !!data.url, pickerLen: data.picker?.length });
 
-        if (data.status === 'error') { warn(FN, `Cobalt errore: ${data.error?.code}`); continue; }
-
+        if (data.status === 'error') {
+          W(FN, `[${i+1}] Cobalt error: ${JSON.stringify(data.error)} → prossima istanza`);
+          continue;
+        }
         if (['stream','redirect','tunnel'].includes(data.status)) {
-          log(FN, `✓ URL diretto (${data.status}): ${data.url?.slice(0,80)}…`);
-          log(FN, `NOTA: URL Cobalt messo direttamente in <video src> — NO proxy video`);
-          return { url: data.url };
+          L(FN, `[${i+1}] ✓ status="${data.status}" → url: ${data.url?.slice(0,80)}…`);
+          L(FN, `[${i+1}] CF Worker relay per CORS…`);
+          const proxied = await proxyVideoUrl(data.url);
+          L(FN, `[${i+1}] URL finale: ${proxied?.slice(0,80)}…`);
+          GE(); return { url: proxied||data.url, needsProxy: true };
         }
-
         if (data.status === 'picker' && data.picker?.length) {
-          log(FN, `✓ Picker con ${data.picker.length} elementi`);
-          return { picker: data.picker.map(item=>({url:item.url, thumb:item.thumb})) };
+          L(FN, `[${i+1}] ✓ status="picker" → ${data.picker.length} stream`);
+          data.picker.forEach((item,idx) => L(FN, `  picker[${idx}]: ${item.url?.slice(0,60)}…`));
+          GE(); return { picker: data.picker };
         }
-        warn(FN, `Status inatteso: "${data.status}"`);
-      } catch(e) { warn(FN, `${instance} eccezione: ${e.message}`); }
+        W(FN, `[${i+1}] Status inatteso: "${data.status}" → prossima istanza`);
+      } catch(e) { E(FN, `[${i+1}] Eccezione su ${inst}: ${e.message}`); }
     }
-    err(FN, `Tutte le ${COBALT_INSTANCES.length} istanze Cobalt fallite`);
-    return null;
+    E(FN, `TUTTE le ${COBALT_INSTANCES.length} istanze Cobalt fallite`);
+    GE(); return null;
   }
 
-  // ── Pyodide + yt-dlp (WASM) ──────────────────────────────────────────────
-  let _pyodide = null, _pyodideLoading = false, _pyodideCallbacks = [], _ytdlpReady = false;
+  // ─── PYODIDE + yt-dlp (fallback universale WASM) ──────────────────────────
+  // loadPyodide():
+  //   1. Carica script Pyodide da CDN (~40MB la prima volta, poi in cache SW)
+  //   2. Inizializza CPython 3.12 in WASM
+  //   3. Installa micropip + yt-dlp via micropip
+  //   4. Patcha urllib.urlopen → ogni richiesta HTTP di yt-dlp passa per CF Worker
+  //      (allorigins aggiunto solo se useAlloriginsFallback = true)
+  //
+  // extractWithYtDlp():
+  //   - Imposta _target_url e _quality come variabili Python globali
+  //   - Esegue yt_dlp.extract_info(download=False)
+  //   - Wrappa URL risultante con CF Worker
+  let _pyodide = null, _ytdlpReady = false, _loading = false, _cbs = [];
   const PYODIDE_CDN = 'https://cdn.jsdelivr.net/pyodide/v0.27.4/full/pyodide.js';
 
-  async function loadPyodide(onProgress) {
-    const FN = 'loadPyodide';
-    if (_pyodide && _ytdlpReady) { log(FN,'Già pronto'); return _pyodide; }
-    if (_pyodideLoading) { log(FN,'In caricamento, attendo…'); return new Promise(r=>_pyodideCallbacks.push(r)); }
-    _pyodideLoading = true;
-    log(FN, `=== Caricamento Pyodide + yt-dlp ===`);
-    log(FN, `LOGICA: Python WASM nel browser. urllib patchato con CORS proxy chain. yt-dlp supporta 1000+ siti.`);
-    onProgress?.('Caricamento Pyodide WASM…', 'Prima volta ~40MB, poi in cache');
+  async function initPyodide(onProgress) {
+    const FN = 'initPyodide';
+    if (_pyodide && _ytdlpReady) { L(FN,'Pyodide già pronto → reuse immediato'); return _pyodide; }
+    if (_loading) { L(FN,'Pyodide in caricamento → attendo callback'); return new Promise(r=>_cbs.push(r)); }
+    _loading = true;
 
+    G(FN, '=== CARICAMENTO PYODIDE + yt-dlp ===');
+    L(FN, `LOGICA: CPython 3.12 in WASM. yt-dlp installato via micropip. urllib.urlopen patchato → CF Worker.`);
+
+    // Step 1: script CDN
     if (!window.loadPyodide) {
-      log(FN, `Inserisco <script src="${PYODIDE_CDN}">…`);
-      await new Promise((resolve,reject)=>{
+      L(FN, `Step 1: inserisco <script src="${PYODIDE_CDN}">…`);
+      onProgress?.('Caricamento Pyodide WASM…','Prima volta ~40MB (poi in cache)');
+      await new Promise((res,rej)=>{
         const s=document.createElement('script'); s.src=PYODIDE_CDN;
-        s.onload=()=>{log(FN,'Script Pyodide caricato');resolve()};
-        s.onerror=(e)=>{err(FN,'Script fallito',e);reject(e)};
+        s.onload=()=>{L(FN,'✓ Script Pyodide caricato'); res();};
+        s.onerror=e=>{E(FN,'Script fallito',e); rej(e);};
         document.head.appendChild(s);
       });
-    }
+    } else { L(FN,'Step 1: window.loadPyodide già disponibile'); }
 
-    log(FN, 'Inizializzo ambiente Python WASM…');
+    // Step 2: ambiente Python
+    L(FN,'Step 2: inizializzo ambiente Python WASM…');
     onProgress?.('Inizializzazione Python WASM…','');
     _pyodide = await window.loadPyodide({ indexURL:'https://cdn.jsdelivr.net/pyodide/v0.27.4/full/' });
-    log(FN, 'Python: '+_pyodide.runPython('import sys; sys.version'));
+    L(FN, `Step 2 ✓ Python: ${_pyodide.runPython('import sys; sys.version')}`);
 
-    log(FN, 'Installo micropip e yt-dlp…');
-    onProgress?.('Installazione yt-dlp…','Download pacchetto Python puro');
+    // Step 3: micropip
+    L(FN,'Step 3: carico micropip…');
+    onProgress?.('Installazione yt-dlp…','Download package Python puro');
     await _pyodide.loadPackage('micropip');
-    await _pyodide.runPythonAsync(`import micropip\nawait micropip.install('yt-dlp')\nprint('[Pyodide] yt-dlp installato')`);
+    L(FN,'Step 3 ✓ micropip caricato');
 
-    log(FN, 'Patching urllib.urlopen con CORS proxy chain…');
-    log(FN, 'LOGICA: yt-dlp usa urllib internamente. Ogni richiesta HTTP viene instradata tramite corsproxy/allorigins.');
+    // Step 4: yt-dlp
+    L(FN,'Step 4: installo yt-dlp via micropip…');
+    await _pyodide.runPythonAsync(`
+import micropip
+print('[Pyodide-Step4] Installazione yt-dlp...')
+await micropip.install('yt-dlp')
+import yt_dlp
+print(f'[Pyodide-Step4] yt-dlp {yt_dlp.version.__version__} installato OK')
+`);
+    L(FN,'Step 4 ✓ yt-dlp installato');
+
+    // Step 5: patch urllib con CF Worker (+ allorigins opzionale)
+    L(FN,'Step 5: patch urllib.urlopen con CF Worker…');
+    L(FN,'LOGICA: ogni richiesta HTTP interna di yt-dlp viene redirezionata via CF Worker');
+    const useAllorigins = MV.getProxySettings().useAlloriginsFallback;
+    L(FN, `useAllorigins in Python patch: ${useAllorigins}`);
+    _pyodide.globals.set('_CF_BASE_PY',    CF_BASE + '/?url=');
+    _pyodide.globals.set('_CF_KEY_PY',     '&key=' + CF_KEY);
+    _pyodide.globals.set('_USE_ALLORIGINS_PY', useAllorigins);
+
     await _pyodide.runPythonAsync(`
 import urllib.request as _ur, urllib.parse as _up, urllib.error
-_PROXIES = ["https://corsproxy.io/?url=","https://api.allorigins.win/raw?url=","https://thingproxy.freeboard.io/fetch/"]
+
+_PROXY_BASES = [_CF_BASE_PY]
+if _USE_ALLORIGINS_PY:
+    _PROXY_BASES.append("https://api.allorigins.win/raw?url=")
+    print(f'[urllib-patch] allorigins aggiunto come fallback')
+
+print(f'[urllib-patch] Proxy configurati: {_PROXY_BASES}')
 _orig = _ur.urlopen
+
 def _patched(url_or_req, data=None, timeout=30, **kw):
-    raw = url_or_req if isinstance(url_or_req,str) else url_or_req.full_url
-    print(f'[urllib] intercettato: {raw[:80]}')
+    raw = url_or_req if isinstance(url_or_req, str) else getattr(url_or_req, 'full_url', str(url_or_req))
+    print(f'[urllib-patch] Intercettato: {raw[:80]}')
     last = None
-    for p in _PROXIES:
-        pu = p + _up.quote(raw,safe='')
-        print(f'[urllib] provo: {pu[:80]}')
+    for i, base in enumerate(_PROXY_BASES):
+        enc = _up.quote(raw, safe='')
+        suffix = _CF_KEY_PY if 'lucatarik' in base else ''
+        pu = base + enc + suffix
+        print(f'[urllib-patch] Proxy {i+1}/{len(_PROXY_BASES)}: {pu[:80]}')
         try:
-            if isinstance(url_or_req,str): return _orig(pu,data=data,timeout=timeout)
-            nr = _ur.Request(pu,data=url_or_req.data,headers=dict(url_or_req.headers),method=url_or_req.get_method())
-            return _orig(nr,timeout=timeout)
+            if isinstance(url_or_req, str):
+                return _orig(pu, data=data, timeout=timeout)
+            nr = _ur.Request(
+                pu,
+                data=getattr(url_or_req, 'data', None),
+                headers=dict(getattr(url_or_req, 'headers', {})),
+                method=url_or_req.get_method() if hasattr(url_or_req, 'get_method') else 'GET'
+            )
+            return _orig(nr, timeout=timeout)
         except Exception as e:
-            print(f'[urllib] proxy fallito: {e}'); last=e
+            print(f'[urllib-patch] Proxy {i+1} fallito: {e}')
+            last = e
     raise last or urllib.error.URLError('Tutti i proxy falliti')
+
 _ur.urlopen = _patched
-print('[urllib] patch applicata')
+print('[urllib-patch] urllib.urlopen patchato con CF Worker')
 `);
 
-    _ytdlpReady = true; _pyodideLoading = false;
-    log(FN, '=== Pyodide + yt-dlp PRONTI ===');
-    _pyodideCallbacks.forEach(cb=>cb(_pyodide)); _pyodideCallbacks=[];
+    _ytdlpReady = true;   // <-- JS, non Python!
+    _loading = false;
+    L(FN,'=== PYODIDE + yt-dlp COMPLETAMENTE PRONTI ===');
+    GE();
+    _cbs.forEach(cb=>cb(_pyodide)); _cbs=[];
     return _pyodide;
   }
 
-  async function extractWithYtDlp(url, quality='720', onProgress) {
+  async function extractWithYtDlp(url, quality = '720', onProgress) {
     const FN = 'extractWithYtDlp';
-    log(FN, `=== yt-dlp WASM ===`);
-    log(FN, `URL: ${url}, quality: ${quality}p`);
-    log(FN, `LOGICA: Pyodide esegue Python nel browser. yt-dlp chiama urllib patchato con CORS proxy. URL CDN risultante → <video src> diretto.`);
-    onProgress?.('yt-dlp WASM…', 'Prima volta ~40-60s, poi in cache');
+    G(FN, `yt-dlp WASM: ${url} [${quality}p]`);
+    L(FN, `LOGICA: Python WASM nel browser. yt-dlp.extract_info(download=False) → URL CDN → CF Worker relay`);
+    L(FN, `Prima apertura: ~40-60s (Pyodide+yt-dlp ~40MB). Successive: istantanee (SW cache)`);
+    onProgress?.('yt-dlp WASM…','Prima volta 40-60s, poi in cache');
 
     let pyodide;
-    try { pyodide = await loadPyodide(onProgress); }
-    catch(e) { err(FN,`loadPyodide fallito: ${e.message}`); return null; }
+    try { pyodide = await initPyodide(onProgress); }
+    catch(e) { E(FN, `initPyodide fallito: ${e.message}`, e); GE(); return null; }
 
-    onProgress?.('yt-dlp in esecuzione…', url.slice(0,50)+'…');
-    log(FN, `Avvio script Python per: ${url}`);
+    L(FN, `Imposto variabili Python: _target_url="${url}" _quality="${quality}"`);
     pyodide.globals.set('_target_url', url);
     pyodide.globals.set('_quality', quality);
+    onProgress?.('yt-dlp in esecuzione…', url.slice(0,50)+'…');
+    L(FN, `Eseguo script Python yt-dlp.extract_info(download=False)…`);
 
     try {
       const resultJson = await pyodide.runPythonAsync(`
 import yt_dlp, json, sys
-print(f'[yt-dlp] URL: {_target_url}')
-print(f'[yt-dlp] quality: {_quality}p')
-_ydl_opts = {'quiet':False,'no_warnings':False,'format':f'bestvideo[height<={_quality}]+bestaudio/best[height<={_quality}]/best','noplaylist':True,'socket_timeout':20}
-_result = None
+print(f'[yt-dlp] === ESTRAZIONE === url={_target_url} quality={_quality}p')
+_opts = {
+    'quiet': False, 'no_warnings': False,
+    'format': f'bestvideo[height<={_quality}]+bestaudio/best[height<={_quality}]/best',
+    'noplaylist': True, 'socket_timeout': 20, 'extractor_retries': 2
+}
+print(f'[yt-dlp] opts={_opts}')
+_res = None
 try:
-    with yt_dlp.YoutubeDL(_ydl_opts) as ydl:
+    with yt_dlp.YoutubeDL(_opts) as ydl:
+        print('[yt-dlp] Chiamo extract_info(download=False)...')
         info = ydl.extract_info(_target_url, download=False)
-        formats = info.get('formats',[info])
-        print(f'[yt-dlp] formati trovati: {len(formats)}')
+        formats = info.get('formats', [info])
+        print(f'[yt-dlp] formati totali ricevuti: {len(formats)}')
         best = None
         for f in reversed(formats):
-            if f.get('url') and f.get('vcodec','none')!='none': best=f; break
-        if not best and formats: best=formats[-1]
-        if best: print(f'[yt-dlp] scelto: {best.get("height","?")}p ext={best.get("ext","?")} url={best.get("url","")[:80]}')
-        _result = json.dumps({'url':best.get('url') if best else info.get('url'),'ext':best.get('ext','mp4') if best else 'mp4','quality':str(best.get('height','?'))+'p' if best and best.get('height') else '?'})
+            print(f'[yt-dlp] formato: id={f.get("format_id","?")} h={f.get("height","?")} vcodec={str(f.get("vcodec","none"))[:15]} url={bool(f.get("url"))}')
+            if f.get('url') and f.get('vcodec', 'none') != 'none':
+                best = f
+                break
+        if not best and formats:
+            best = formats[-1]
+            print('[yt-dlp] Nessun formato con video → uso ultimo disponibile')
+        if best:
+            print(f'[yt-dlp] SCELTO: {best.get("height","?")}p ext={best.get("ext","?")} url={best.get("url","")[:80]}...')
+        _res = json.dumps({
+            'url': best.get('url') if best else info.get('url'),
+            'ext': (best or info).get('ext', 'mp4'),
+            'quality': str(best.get('height','?'))+'p' if best and best.get('height') else '?',
+            'title': info.get('title', '')
+        })
 except Exception as e:
-    print(f'[yt-dlp] ERRORE: {e}',file=sys.stderr)
-    _result = json.dumps({'error':str(e)})
-_result
+    import traceback
+    tb = traceback.format_exc()
+    print(f'[yt-dlp] ERRORE: {e}', file=sys.stderr)
+    print(f'[yt-dlp] TRACEBACK:\\n{tb}', file=sys.stderr)
+    _res = json.dumps({'error': str(e), 'tb': tb[:500]})
+print(f'[yt-dlp] Risultato JSON: {_res[:200]}')
+_res
 `);
       const result = JSON.parse(resultJson);
-      log(FN, 'Risultato Python:', result);
-      if (result.error) { err(FN, `yt-dlp errore: ${result.error}`); return null; }
-      if (!result.url) { err(FN, 'Nessun URL nel risultato'); return null; }
-      log(FN, `✓ Estratto: ${result.quality} → ${result.url.slice(0,80)}…`);
-      log(FN, `NOTA: URL CDN → <video src> diretto, NO proxy video`);
-      return { url: result.url, quality: result.quality };
-    } catch(e) { err(FN, `Errore Python: ${e.message}`, e); return null; }
+      L(FN, `Risultato Python:`, result);
+      if (result.error) { E(FN, `yt-dlp error: ${result.error}`); if(result.tb) E(FN, result.tb); GE(); return null; }
+      if (!result.url)  { E(FN, 'Nessun URL nel risultato Python'); GE(); return null; }
+      L(FN, `✓ URL estratto (${result.quality}): ${result.url.slice(0,100)}…`);
+      L(FN, `CF Worker relay per CORS…`);
+      const proxied = await proxyVideoUrl(result.url);
+      L(FN, `URL finale: ${proxied?.slice(0,100)}…`);
+      GE(); return { url: proxied||result.url, quality: result.quality, needsProxy: true };
+    } catch(e) { E(FN, `Eccezione JS: ${e.message}`, e); GE(); return null; }
   }
 
-  // ── ROUTER PRINCIPALE ────────────────────────────────────────────────────
-  const EMBED_ONLY = ['spotify','twitch'];
-  const COBALT_PLATFORMS = ['tiktok','twitter','facebook'];
+  // ─── ROUTER PRINCIPALE ────────────────────────────────────────────────────
+  const EMBED_ONLY  = ['spotify','twitch'];
+  const COBALT_PLATS = ['tiktok','twitter','facebook'];
 
-  async function extract(url, platform, quality='720', onProgress) {
+  async function extract(url, platform, quality = '720', onProgress) {
     const FN = 'extract';
-    log(FN, `════ NUOVA ESTRAZIONE ════`);
-    log(FN, `URL: ${url}`);
-    log(FN, `Piattaforma: ${platform} | Qualità: ${quality}p`);
+    MV.section(`[extractor.js] ESTRAZIONE: ${platform} → ${url.slice(0,50)}`);
+    L(FN, `URL completo: ${url}`);
+    L(FN, `Platform: "${platform}"  |  Quality: ${quality}p`);
+    L(FN, `Settings: useAllorigins=${MV.getProxySettings().useAlloriginsFallback}`);
+    L(FN, `Timestamp: ${new Date().toISOString()}`);
+
+    let result = null;
 
     if (/\.(mp4|webm|mov|ogg|m3u8|ts)(\?.*)?$/i.test(url)) {
-      log(FN, `PERCORSO: file diretto → play immediato`); return { url };
+      L(FN, `PERCORSO → file diretto → play immediato (no proxy)`);
+      result = { url, needsProxy: false, direct: true };
     }
-    if (EMBED_ONLY.includes(platform)) {
-      log(FN, `PERCORSO: ${platform} → embed-only`); return { embedOnly:true };
+    else if (EMBED_ONLY.includes(platform)) {
+      L(FN, `PERCORSO → "${platform}" → embed-only (nessun stream audio/video diretto disponibile)`);
+      result = { embedOnly: true };
     }
-    if (platform==='youtube' || /youtu\.?be/.test(url)) {
-      log(FN, `PERCORSO: YouTube → Invidious → yt-dlp`);
+    else if (platform === 'youtube' || /youtu\.?be/.test(url)) {
+      L(FN, `PERCORSO → YouTube: [1] Invidious → [2] yt-dlp WASM`);
       onProgress?.('YouTube · Invidious…');
-      const r = await extractYouTube(url, quality, onProgress);
-      if (r) { log(FN,'✓ YouTube via Invidious'); return r; }
-      log(FN,'Invidious fallito → yt-dlp');
-      return extractWithYtDlp(url, quality, onProgress);
+      result = await extractYouTube(url, quality, onProgress);
+      if (!result) { L(FN,'Invidious fallito → yt-dlp'); result = await extractWithYtDlp(url, quality, onProgress); }
     }
-    if (platform==='vimeo' || url.includes('vimeo.com')) {
-      log(FN, `PERCORSO: Vimeo → config API → yt-dlp`);
-      const r = await extractVimeo(url, quality, onProgress);
-      if (r) { log(FN,'✓ Vimeo via config API'); return r; }
-      return extractWithYtDlp(url, quality, onProgress);
+    else if (platform === 'vimeo' || url.includes('vimeo.com')) {
+      L(FN, `PERCORSO → Vimeo: [1] config API → [2] yt-dlp WASM`);
+      result = await extractVimeo(url, quality, onProgress);
+      if (!result) { L(FN,'config API fallita → yt-dlp'); result = await extractWithYtDlp(url, quality, onProgress); }
     }
-    if (platform==='reddit' || url.includes('reddit.com')) {
-      log(FN, `PERCORSO: Reddit → .json API → Cobalt`);
-      const r = await extractReddit(url, onProgress);
-      if (r) { log(FN,'✓ Reddit via JSON API'); return r; }
-      return extractViaCobalt(url, quality, onProgress);
+    else if (platform === 'reddit' || url.includes('reddit.com')) {
+      L(FN, `PERCORSO → Reddit: [1] .json API → [2] Cobalt`);
+      result = await extractReddit(url, onProgress);
+      if (!result) { L(FN,'.json fallito → Cobalt'); result = await extractViaCobalt(url, quality, onProgress); }
     }
-    if (platform==='instagram' || /instagram\.com\/(reels?|p|tv|stories|share)\//.test(url)) {
-      log(FN, `PERCORSO: Instagram → vxinstagram → Cobalt → embedOnly`);
-      const r = await extractInstagram(url, onProgress);
-      if (r) { log(FN,'✓ Instagram via vxinstagram'); return r; }
-      const c = await extractViaCobalt(url, quality, onProgress);
-      if (c) { log(FN,'✓ Instagram via Cobalt'); return c; }
-      log(FN,'Tutti falliti → embedOnly iframe vxinstagram');
-      return { embedOnly:true };
+    else if (platform === 'instagram' || /instagram\.com\/(reels?|p|tv|stories|share)\//.test(url)) {
+      L(FN, `PERCORSO → Instagram: [1] vxinstagram+CF Worker → [2] Cobalt → [3] embedOnly`);
+      result = await extractInstagram(url, onProgress);
+      if (!result) { L(FN,'vxinstagram fallito → Cobalt'); result = await extractViaCobalt(url, quality, onProgress); }
+      if (!result) { L(FN,'Cobalt fallito → embedOnly iframe'); result = { embedOnly: true }; }
     }
-    if (COBALT_PLATFORMS.includes(platform)) {
-      log(FN, `PERCORSO: ${platform} → Cobalt → yt-dlp`);
-      const r = await extractViaCobalt(url, quality, onProgress);
-      if (r) { log(FN,`✓ ${platform} via Cobalt`); return r; }
-      return extractWithYtDlp(url, quality, onProgress);
+    else if (COBALT_PLATS.includes(platform)) {
+      L(FN, `PERCORSO → ${platform}: [1] Cobalt → [2] yt-dlp WASM`);
+      result = await extractViaCobalt(url, quality, onProgress);
+      if (!result) { L(FN,'Cobalt fallito → yt-dlp'); result = await extractWithYtDlp(url, quality, onProgress); }
     }
-    log(FN, `PERCORSO: piattaforma "${platform}" senza fast-path → yt-dlp universale`);
-    return extractWithYtDlp(url, quality, onProgress);
+    else {
+      L(FN, `PERCORSO → "${platform}" senza fast-path → yt-dlp WASM universale (1000+ siti)`);
+      result = await extractWithYtDlp(url, quality, onProgress);
+    }
+
+    if (result) L(FN, `✓ ESTRAZIONE COMPLETATA:`, result);
+    else        E(FN, `✗ TUTTI I METODI FALLITI per: ${url}`);
+
+    MV.groupEnd();
+    return result;
   }
 
   function preloadPyodide() {
-    if (_pyodide||_pyodideLoading) return;
-    log('preloadPyodide','Pre-caricamento in background (idle)…');
-    setTimeout(()=>loadPyodide(()=>{}), 5000);
+    if (_pyodide||_loading) { L('preloadPyodide','Già caricato/in caricamento → skip'); return; }
+    L('preloadPyodide','Pre-caricamento Pyodide in background (5s delay)…');
+    setTimeout(()=>initPyodide(()=>{}), 5000);
   }
 
   function getVxInstagramUrl(url) { return buildVxUrl(url); }
 
+  L('init', '✓ Extractor pronto (CF Worker only — no corsproxy.io)');
   return { extract, preloadPyodide, getVxInstagramUrl, extractViaCobalt };
+
 })();
