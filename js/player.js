@@ -223,97 +223,57 @@ const VideoPlayer = (() => {
     `;
   }
 
-  // ─── Instagram Direct Video ───────────────────────────────────────────────
-  // Strategia a cascata:
-  // 1. ddinstagram.com — proxy che serve i video IG direttamente
-  // 2. instagramez.com — altro proxy
-  // 3. allorigins fetch della pagina IG originale (og:video)
-  // 4. Cobalt API
-  // 5. Iframe embed nativo IG
+  // ─── CORS Proxy chain ─────────────────────────────────────────────────────
+  // Lista di proxy per fetchare pagine HTML (aggira CORS in lettura)
+  const FETCH_PROXIES = [
+    url => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
+    url => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+    url => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+  ];
 
-  async function getInstagramDirectUrl(url) {
+  // Lista di proxy per wrappare l'URL video come src del <video> (aggira CORS in streaming)
+  const VIDEO_PROXIES = [
+    url => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+    url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    url => `https://thingproxy.freeboard.io/fetch/${url}`,
+  ];
 
-    // ── Strategia 1: vxinstagram.com (powered by SnapSave API) ───────────
-    // Converte l'URL sostituendo il dominio con vxinstagram.com
-    // vxinstagram risponde con OGP tags (og:video) che puntano al video diretto
-    // Supporta: post, reels, stories, album, condivisioni
-    // Ref: https://vxinstagram.com
-    try {
-      // Normalizza il path: /reels/ → /reel/ come richiesto da vxinstagram
-      const vxUrl = url
-        .replace(/https?:\/\/(www\.)?instagram\.com/, 'https://www.vxinstagram.com')
-        .replace(/\/reels\//, '/reel/')   // vxinstagram usa /reel/ (singolare)
-        .replace(/\/$/, '') + '/';
-
-      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(vxUrl)}`;
-      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(10000) });
-      const data = await res.json();
-      if (data?.contents) {
-        const videoUrl = extractVideoFromHtml(data.contents);
-        if (videoUrl) {
-          console.log('[IG] vxinstagram → trovato video:', videoUrl.slice(0, 80));
-          return videoUrl;
-        }
+  // Fetcha HTML di una pagina provando tutti i proxy in cascata
+  async function fetchHtmlViaProxy(targetUrl) {
+    for (const buildProxy of FETCH_PROXIES) {
+      try {
+        const proxyUrl = buildProxy(targetUrl);
+        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
+        if (!res.ok) continue;
+        const data = await res.json().catch(() => null);
+        // allorigins e codetabs restituiscono { contents: "..." }
+        if (data?.contents) return data.contents;
+        // corsproxy restituisce il body diretto
+        const text = await res.text().catch(() => null);
+        if (text && text.length > 100) return text;
+      } catch (e) {
+        console.warn(`[proxy] ${buildProxy(targetUrl).slice(0, 40)} fallito:`, e.message);
       }
-    } catch (e) { console.warn('[IG] vxinstagram fallito:', e.message); }
-
-    // ── Strategia 2: d.vxinstagram.com (variante con post details) ───────
-    try {
-      const dvxUrl = url
-        .replace(/https?:\/\/(www\.)?instagram\.com/, 'https://www.d.vxinstagram.com')
-        .replace(/\/reels\//, '/reel/')
-        .replace(/\/$/, '') + '/';
-
-      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(dvxUrl)}`;
-      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(10000) });
-      const data = await res.json();
-      if (data?.contents) {
-        const videoUrl = extractVideoFromHtml(data.contents);
-        if (videoUrl) {
-          console.log('[IG] d.vxinstagram → trovato video:', videoUrl.slice(0, 80));
-          return videoUrl;
-        }
-      }
-    } catch (e) { console.warn('[IG] d.vxinstagram fallito:', e.message); }
-
-    // ── Strategia 3: og:video dalla pagina originale tramite proxy ────────
-    try {
-      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
-      const data = await res.json();
-      if (data?.contents) {
-        const videoUrl = extractVideoFromHtml(data.contents);
-        if (videoUrl) {
-          console.log('[IG] og:video diretto → trovato:', videoUrl.slice(0, 80));
-          return videoUrl;
-        }
-      }
-    } catch (e) { console.warn('[IG] og:video fallito:', e.message); }
-
+    }
     return null;
   }
 
-  // Estrae URL video da HTML grezzo (og:video, <video src>, oppure JSON-LD)
-  function extractVideoFromHtml(html) {
-    // 1. og:video
-    const ogVideo = html.match(/<meta[^>]+property=["']og:video["'][^>]+content=["']([^"']+)["']/i)
-                 || html.match(/<meta[^>]+content=["']([^"']+\.mp4[^"']*)["'][^>]+property=["']og:video["']/i);
-    if (ogVideo?.[1]) return decodeHtmlEntities(ogVideo[1]);
+  // Estrae l'URL raw del video dall'HTML di vxinstagram
+  // Cerca: <source src="...">, og:video, og:video:secure_url
+  function extractSourceUrl(html) {
+    // 1. <source src="..."> — il più affidabile, è il tag diretto nel <video>
+    const sourceSrc = html.match(/<source[^>]+src=["']([^"']+)["']/i);
+    if (sourceSrc?.[1]) return decodeHtmlEntities(sourceSrc[1]);
 
     // 2. og:video:secure_url
-    const ogSecure = html.match(/<meta[^>]+property=["']og:video:secure_url["'][^>]+content=["']([^"']+)["']/i);
+    const ogSecure = html.match(/property=["']og:video:secure_url["'][^>]*content=["']([^"']+)["']/i)
+                  || html.match(/content=["']([^"']+)["'][^>]*property=["']og:video:secure_url["']/i);
     if (ogSecure?.[1]) return decodeHtmlEntities(ogSecure[1]);
 
-    // 3. <video src="...">
-    const videoSrc = html.match(/<video[^>]+src=["']([^"']+\.mp4[^"']*)["']/i);
-    if (videoSrc?.[1]) return decodeHtmlEntities(videoSrc[1]);
-
-    // 4. JSON blob con video_url o playback_url
-    const jsonMatch = html.match(/"video_url"\s*:\s*"([^"]+\.mp4[^"]*)"/);
-    if (jsonMatch?.[1]) return jsonMatch[1].replace(/\\u0026/g, '&').replace(/\\/g, '');
-
-    const playback = html.match(/"playback_url"\s*:\s*"([^"]+)"/);
-    if (playback?.[1]) return playback[1].replace(/\\u0026/g, '&').replace(/\\/g, '');
+    // 3. og:video
+    const ogVideo = html.match(/property=["']og:video["'][^>]*content=["']([^"']+)["']/i)
+                 || html.match(/content=["']([^"']+)["'][^>]*property=["']og:video["']/i);
+    if (ogVideo?.[1]) return decodeHtmlEntities(ogVideo[1]);
 
     return null;
   }
@@ -325,6 +285,56 @@ const VideoPlayer = (() => {
       .replace(/&gt;/g, '>')
       .replace(/&quot;/g, '"')
       .replace(/&#39;/g, "'");
+  }
+
+  // Pipeline completa per Instagram:
+  // 1. Fetcha vxinstagram via proxy → estrai URL sorgente
+  // 2. Wrappa URL sorgente con corsproxy per la riproduzione
+  async function getInstagramVideoUrl(igUrl) {
+    const vxUrl = buildVxInstagramUrl(igUrl);
+    if (!vxUrl) return null;
+
+    console.log('[IG] Fetching vxinstagram:', vxUrl);
+
+    // Step 1: ottieni HTML di vxinstagram tramite proxy
+    const html = await fetchHtmlViaProxy(vxUrl);
+    if (!html) {
+      console.warn('[IG] Impossibile fetchare la pagina vxinstagram');
+      return null;
+    }
+
+    // Step 2: estrai l'URL del video dalla pagina
+    const rawVideoUrl = extractSourceUrl(html);
+    if (!rawVideoUrl) {
+      console.warn('[IG] Nessun URL video trovato nell\'HTML');
+      return null;
+    }
+    console.log('[IG] URL estratto:', rawVideoUrl.slice(0, 80) + '…');
+
+    // Step 3: wrappa con corsproxy per permettere la riproduzione
+    // (l'URL estratto è su vxinstagram/rapidcdn che ha CORS bloccato)
+    for (const buildVideoProxy of VIDEO_PROXIES) {
+      const proxiedUrl = buildVideoProxy(rawVideoUrl);
+      console.log('[IG] Provo video proxy:', proxiedUrl.slice(0, 60) + '…');
+
+      // Verifica veloce che il proxy risponda (HEAD request)
+      try {
+        const probe = await fetch(proxiedUrl, {
+          method: 'HEAD',
+          signal: AbortSignal.timeout(5000),
+        });
+        if (probe.ok || probe.status === 206) {
+          console.log('[IG] ✓ Video proxy funzionante:', proxiedUrl.slice(0, 60));
+          return proxiedUrl;
+        }
+      } catch (e) {
+        console.warn('[IG] Video proxy HEAD fallito:', e.message);
+      }
+    }
+
+    // Se HEAD fallisce per tutti, prova comunque il primo (alcuni proxy non supportano HEAD)
+    console.warn('[IG] HEAD falliti, provo direttamente corsproxy');
+    return VIDEO_PROXIES[0](rawVideoUrl);
   }
   function togglePlay() {
     if (!videoEl) return;
@@ -414,13 +424,14 @@ const VideoPlayer = (() => {
     document.querySelectorAll('.mv-quality-opt').forEach(el => {
       el.classList.toggle('active', el.textContent === quality + 'p');
     });
-    // Re-fetch with new quality
     const savedTime = videoEl ? videoEl.currentTime : 0;
-    showLoading('Cambio qualità…', quality + 'p');
-    const result = await fetchFromCobalt(currentPost.url, quality);
-    if (result?.type === 'single') {
-      loadVideoUrl(result.url, savedTime);
-    }
+    showLoading('Cambio qualità ' + quality + 'p…', '');
+    const result = await Extractor.extract(
+      currentPost.url, currentPost.platform, quality,
+      (msg) => { const el = document.getElementById('mv-loading-sub'); if (el) el.textContent = msg; }
+    );
+    if (result?.url) loadVideoUrl(result.url, savedTime);
+    else showError('Qualità non disponibile.');
   }
 
   function showLoading(text, sub) {
@@ -590,17 +601,9 @@ const VideoPlayer = (() => {
     startHideControls();
   }
 
-  // ─── vxinstagram URL builder ──────────────────────────────────────────────
-  // Converte qualsiasi URL Instagram nell'equivalente vxinstagram per embed iframe.
-  // vxinstagram supporta tutti i path originali: /p/ /reel/ /reels/ /tv/ /stories/ /share/
-  // NON serve normalizzare il path — /reels/ funziona direttamente.
+  // ─── vxinstagram URL builder (delegato a Extractor) ──────────────────────
   function buildVxInstagramUrl(url) {
-    try {
-      const u = new URL(url);
-      if (!u.hostname.includes('instagram.com')) return null;
-      // Semplice sostituzione del dominio, path invariato
-      return `https://www.vxinstagram.com${u.pathname}`;
-    } catch { return null; }
+    return Extractor.getVxInstagramUrl(url);
   }
 
   // ─── Public API ───────────────────────────────────────────────────────────
@@ -614,52 +617,56 @@ const VideoPlayer = (() => {
 
     // Build player HTML
     viewerContentEl.innerHTML = buildPlayerHTML(post);
-    showLoading('Avvio riproduzione…', 'Recupero stream diretto…');
+    showLoading('Avvio riproduzione…', 'Analisi piattaforma…');
 
     const platform = post.platform;
     const url = post.url;
 
-    // ── File diretto (.mp4 ecc.) → play subito
-    if (url.match(/\.(mp4|webm|mov|ogg|m3u8)(\?.*)?$/i)) {
-      loadVideoUrl(url);
-      return;
-    }
-
-    // ── Instagram: usa vxinstagram come iframe diretto (no proxy, no CORS issues)
-    if (platform === 'instagram' || /instagram\.com\/(reels?|p|tv|stories|share)\//.test(url)) {
-      const vxUrl = buildVxInstagramUrl(url);
-      if (vxUrl) {
-        // Chiudi il player custom e carica vxinstagram come iframe
-        cleanup();
-        window._viewerFallbackEmbed({ ...post, embedUrl: vxUrl, _vxEmbed: true });
-        return;
-      }
-      // Fallback: embed nativo Instagram
+    // Spotify → sempre embed
+    if (platform === 'spotify') {
       cleanup();
       window._viewerFallbackEmbed(post);
       return;
     }
 
-    // ── Cobalt per le altre piattaforme supportate
-    if (isCobaltSupported(platform, url)) {
-      document.getElementById('mv-loading-sub').textContent = 'Connessione a Cobalt…';
-      const result = await fetchFromCobalt(url, currentQuality);
-
-      if (result?.type === 'single') {
-        loadVideoUrl(result.url);
-        return;
+    // Usa il modulo Extractor universale
+    const result = await Extractor.extract(
+      url,
+      platform,
+      currentQuality,
+      (msg, sub) => {
+        const textEl = document.getElementById('mv-loading-text');
+        const subEl  = document.getElementById('mv-loading-sub');
+        if (textEl) textEl.textContent = msg;
+        if (subEl)  subEl.textContent  = sub || '';
       }
-      if (result?.type === 'picker') {
-        showPicker(result.items);
-        return;
-      }
+    );
 
-      showError('Cobalt non ha trovato uno stream per questo URL.');
+    if (!result) {
+      showError('Nessuno stream trovato. Prova "Usa embed" o apri l\'originale.');
       return;
     }
 
-    // ── Non è una piattaforma video
-    showError('Questa piattaforma non supporta la riproduzione diretta.');
+    // Embed-only (Spotify, Twitch ecc.)
+    if (result.embedOnly) {
+      cleanup();
+      window._viewerFallbackEmbed(post);
+      return;
+    }
+
+    // Picker (es. Twitter con più video)
+    if (result.picker) {
+      showPicker(result.picker);
+      return;
+    }
+
+    // URL diretto → riproduci
+    if (result.url) {
+      loadVideoUrl(result.url);
+      return;
+    }
+
+    showError('Formato non supportato. Usa "Usa embed" o apri l\'originale.');
   }
 
   function retryDirect() {
