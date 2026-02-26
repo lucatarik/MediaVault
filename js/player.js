@@ -223,119 +223,12 @@ const VideoPlayer = (() => {
     `;
   }
 
-  // ─── CORS Proxy chain ─────────────────────────────────────────────────────
-  // Lista di proxy per fetchare pagine HTML (aggira CORS in lettura)
-  const FETCH_PROXIES = [
-    url => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
-    url => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
-    url => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-  ];
+  // ─── Player Controls ──────────────────────────────────────────────────────
+  // NOTA: tutta la logica di estrazione URL è in extractor.js
+  // player.js gestisce SOLO il rendering del player e i controlli UI.
+  // Gli URL arrivano già pronti da Extractor.extract() e vanno DIRETTAMENTE
+  // nel tag <video src="..."> senza alcun proxy intermedio.
 
-  // Lista di proxy per wrappare l'URL video come src del <video> (aggira CORS in streaming)
-  const VIDEO_PROXIES = [
-    url => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
-    url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    url => `https://thingproxy.freeboard.io/fetch/${url}`,
-  ];
-
-  // Fetcha HTML di una pagina provando tutti i proxy in cascata
-  async function fetchHtmlViaProxy(targetUrl) {
-    for (const buildProxy of FETCH_PROXIES) {
-      try {
-        const proxyUrl = buildProxy(targetUrl);
-        const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
-        if (!res.ok) continue;
-        const data = await res.json().catch(() => null);
-        // allorigins e codetabs restituiscono { contents: "..." }
-        if (data?.contents) return data.contents;
-        // corsproxy restituisce il body diretto
-        const text = await res.text().catch(() => null);
-        if (text && text.length > 100) return text;
-      } catch (e) {
-        console.warn(`[proxy] ${buildProxy(targetUrl).slice(0, 40)} fallito:`, e.message);
-      }
-    }
-    return null;
-  }
-
-  // Estrae l'URL raw del video dall'HTML di vxinstagram
-  // Cerca: <source src="...">, og:video, og:video:secure_url
-  function extractSourceUrl(html) {
-    // 1. <source src="..."> — il più affidabile, è il tag diretto nel <video>
-    const sourceSrc = html.match(/<source[^>]+src=["']([^"']+)["']/i);
-    if (sourceSrc?.[1]) return decodeHtmlEntities(sourceSrc[1]);
-
-    // 2. og:video:secure_url
-    const ogSecure = html.match(/property=["']og:video:secure_url["'][^>]*content=["']([^"']+)["']/i)
-                  || html.match(/content=["']([^"']+)["'][^>]*property=["']og:video:secure_url["']/i);
-    if (ogSecure?.[1]) return decodeHtmlEntities(ogSecure[1]);
-
-    // 3. og:video
-    const ogVideo = html.match(/property=["']og:video["'][^>]*content=["']([^"']+)["']/i)
-                 || html.match(/content=["']([^"']+)["'][^>]*property=["']og:video["']/i);
-    if (ogVideo?.[1]) return decodeHtmlEntities(ogVideo[1]);
-
-    return null;
-  }
-
-  function decodeHtmlEntities(str) {
-    return str
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'");
-  }
-
-  // Pipeline completa per Instagram:
-  // 1. Fetcha vxinstagram via proxy → estrai URL sorgente
-  // 2. Wrappa URL sorgente con corsproxy per la riproduzione
-  async function getInstagramVideoUrl(igUrl) {
-    const vxUrl = buildVxInstagramUrl(igUrl);
-    if (!vxUrl) return null;
-
-    console.log('[IG] Fetching vxinstagram:', vxUrl);
-
-    // Step 1: ottieni HTML di vxinstagram tramite proxy
-    const html = await fetchHtmlViaProxy(vxUrl);
-    if (!html) {
-      console.warn('[IG] Impossibile fetchare la pagina vxinstagram');
-      return null;
-    }
-
-    // Step 2: estrai l'URL del video dalla pagina
-    const rawVideoUrl = extractSourceUrl(html);
-    if (!rawVideoUrl) {
-      console.warn('[IG] Nessun URL video trovato nell\'HTML');
-      return null;
-    }
-    console.log('[IG] URL estratto:', rawVideoUrl.slice(0, 80) + '…');
-
-    // Step 3: wrappa con corsproxy per permettere la riproduzione
-    // (l'URL estratto è su vxinstagram/rapidcdn che ha CORS bloccato)
-    for (const buildVideoProxy of VIDEO_PROXIES) {
-      const proxiedUrl = buildVideoProxy(rawVideoUrl);
-      console.log('[IG] Provo video proxy:', proxiedUrl.slice(0, 60) + '…');
-
-      // Verifica veloce che il proxy risponda (HEAD request)
-      try {
-        const probe = await fetch(proxiedUrl, {
-          method: 'HEAD',
-          signal: AbortSignal.timeout(5000),
-        });
-        if (probe.ok || probe.status === 206) {
-          console.log('[IG] ✓ Video proxy funzionante:', proxiedUrl.slice(0, 60));
-          return proxiedUrl;
-        }
-      } catch (e) {
-        console.warn('[IG] Video proxy HEAD fallito:', e.message);
-      }
-    }
-
-    // Se HEAD fallisce per tutti, prova comunque il primo (alcuni proxy non supportano HEAD)
-    console.warn('[IG] HEAD falliti, provo direttamente corsproxy');
-    return VIDEO_PROXIES[0](rawVideoUrl);
-  }
   function togglePlay() {
     if (!videoEl) return;
     if (videoEl.paused) {
@@ -434,7 +327,17 @@ const VideoPlayer = (() => {
     else showError('Qualità non disponibile.');
   }
 
+  // ─── Player log helper ────────────────────────────────────────────────────
+  // FILE: js/player.js — log con prefisso colorato e nome funzione
+  function PL(fn, msg, data) {
+    const s = 'color:#f5a623;font-weight:bold';
+    data !== undefined
+      ? console.log(`%c[player.js · ${fn}] ${msg}`, s, data)
+      : console.log(`%c[player.js · ${fn}] ${msg}`, s);
+  }
+
   function showLoading(text, sub) {
+    PL('showLoading', `Mostro schermata loading — text="${text}" sub="${sub}"`);
     const loadEl = document.getElementById('mv-loading');
     const videoWrap = document.getElementById('mv-video-wrap');
     const errEl = document.getElementById('mv-error');
@@ -448,6 +351,7 @@ const VideoPlayer = (() => {
   }
 
   function showError(text) {
+    PL('showError', `Mostro errore: "${text}"`);
     document.getElementById('mv-loading').style.display = 'none';
     document.getElementById('mv-video-wrap').style.display = 'none';
     document.getElementById('mv-picker').style.display = 'none';
@@ -457,6 +361,7 @@ const VideoPlayer = (() => {
   }
 
   function showPicker(items) {
+    PL('showPicker', `Mostro picker con ${items.length} stream disponibili`);
     document.getElementById('mv-loading').style.display = 'none';
     document.getElementById('mv-video-wrap').style.display = 'none';
     document.getElementById('mv-error').style.display = 'none';
@@ -472,6 +377,12 @@ const VideoPlayer = (() => {
   }
 
   function loadVideoUrl(url, startTime = 0) {
+    PL('loadVideoUrl', `══ CARICO VIDEO ══`);
+    PL('loadVideoUrl', `URL (${url.length} char): ${url.slice(0, 120)}…`);
+    PL('loadVideoUrl', `startTime: ${startTime}s`);
+    PL('loadVideoUrl', `STRATEGIA: URL va DIRETTAMENTE in <video src="..."> — nessun proxy video`);
+    PL('loadVideoUrl', `Il tag <video> gestisce autonomamente redirect e autenticazione CDN`);
+
     document.getElementById('mv-loading').style.display = 'none';
     document.getElementById('mv-error').style.display = 'none';
     document.getElementById('mv-picker').style.display = 'none';
@@ -480,62 +391,84 @@ const VideoPlayer = (() => {
     videoWrap.style.opacity = '0';
 
     videoEl = document.getElementById('mv-video');
+    PL('loadVideoUrl', `Imposto videoEl.src = "${url.slice(0, 100)}…"`);
     videoEl.src = url;
     videoEl.currentTime = startTime;
 
     setupVideoEvents();
 
+    PL('loadVideoUrl', `Chiamo videoEl.play() — se autoplay è bloccato dal browser mostro il tasto play`);
     videoEl.play().then(() => {
+      PL('loadVideoUrl', `play() riuscito ✓ — fade-in del player`);
       videoWrap.style.transition = 'opacity 0.3s';
       videoWrap.style.opacity = '1';
     }).catch(e => {
-      // Autoplay blocked — show play button
+      PL('loadVideoUrl', `play() bloccato dal browser (autoplay policy) — mostro comunque il player con tasto play`, e.message);
       videoWrap.style.opacity = '1';
-      console.warn('Autoplay blocked:', e);
     });
   }
 
   function setupVideoEvents() {
-    if (!videoEl) return;
+    if (!videoEl) { PL('setupVideoEvents','WARN: videoEl è null, skip'); return; }
+    PL('setupVideoEvents', `Registro event listeners su <video id="${videoEl.id}">`);
 
+    // Rimuovi listener precedenti clonando il nodo (evita duplicati su re-open)
+    const oldVideo = videoEl;
+    const newVideo = oldVideo.cloneNode(true);
+    oldVideo.parentNode.replaceChild(newVideo, oldVideo);
+    videoEl = newVideo;
+    PL('setupVideoEvents', `Video node clonato per evitare listener duplicati`);
+
+    videoEl.addEventListener('loadstart',  () => PL('videoEvent', `loadstart — browser ha iniziato a caricare: ${videoEl.src.slice(0,80)}…`));
+    videoEl.addEventListener('loadedmetadata', () => PL('videoEvent', `loadedmetadata — durata: ${videoEl.duration?.toFixed(1)}s, dimensioni: ${videoEl.videoWidth}x${videoEl.videoHeight}`));
+    videoEl.addEventListener('canplay',    () => PL('videoEvent', `canplay — buffer sufficiente per iniziare`));
+    videoEl.addEventListener('waiting',    () => PL('videoEvent', `waiting — buffering in corso…`));
+    videoEl.addEventListener('stalled',    () => PL('videoEvent', `stalled — rete lenta o server non risponde`));
     videoEl.addEventListener('timeupdate', updateProgress);
-    videoEl.addEventListener('progress', updateBuffered);
+    videoEl.addEventListener('progress',   updateBuffered);
+
     videoEl.addEventListener('play', () => {
+      PL('videoEvent', `play — riproduzione avviata ✓`);
       document.getElementById('mv-play-icon').className = 'fas fa-pause';
       startHideControls();
     });
     videoEl.addEventListener('pause', () => {
+      PL('videoEvent', `pause — riproduzione in pausa`);
       document.getElementById('mv-play-icon').className = 'fas fa-play';
       clearTimeout(hideControlsTimer);
       showControls();
     });
     videoEl.addEventListener('ended', () => {
+      PL('videoEvent', `ended — video terminato`);
       document.getElementById('mv-play-icon').className = 'fas fa-play';
       showControls();
     });
+
     videoEl.addEventListener('error', (e) => {
-      console.error('Video error:', e);
-      showError('Errore riproduzione. Prova a cambiare qualità o usa embed.');
+      const ve = videoEl.error;
+      const codes = { 1:'MEDIA_ERR_ABORTED', 2:'MEDIA_ERR_NETWORK', 3:'MEDIA_ERR_DECODE', 4:'MEDIA_ERR_SRC_NOT_SUPPORTED' };
+      const codeStr = ve ? (codes[ve.code] || `code=${ve.code}`) : 'unknown';
+      const msg = ve?.message || '';
+      console.error(`[player.js · videoEvent] ✗ ERRORE VIDEO — ${codeStr}: ${msg}`);
+      console.error(`[player.js · videoEvent]   src era: ${videoEl.src?.slice(0,120)}`);
+      console.error(`[player.js · videoEvent]   Causa più comune per MEDIA_ERR_NETWORK: CORS bloccato sul CDN`);
+      console.error(`[player.js · videoEvent]   Causa più comune per MEDIA_ERR_SRC_NOT_SUPPORTED: formato non supportato o URL non valido`);
+      showError(`Errore ${codeStr}${msg ? ': '+msg : ''} — prova a cambiare qualità o usa embed`);
     });
-    videoEl.addEventListener('waiting', () => {
-      // buffering indicator
-    });
+
     videoEl.addEventListener('dblclick', toggleFullscreen);
 
-    // Fullscreen change
     document.addEventListener('fullscreenchange', () => {
       const icon = document.getElementById('mv-fs-icon');
       if (icon) icon.className = document.fullscreenElement ? 'fas fa-compress' : 'fas fa-expand';
     });
 
-    // Controls auto-hide
     const overlay = document.getElementById('mv-controls-overlay');
     if (overlay) {
       overlay.addEventListener('mousemove', showAndScheduleHide);
       overlay.addEventListener('touchstart', showAndScheduleHide, { passive: true });
     }
 
-    // Keyboard shortcuts
     document._mvKeyHandler = (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
       if (!document.getElementById('mv-player')) return;
@@ -550,6 +483,7 @@ const VideoPlayer = (() => {
       }
     };
     document.addEventListener('keydown', document._mvKeyHandler);
+    PL('setupVideoEvents', `Tutti i listener registrati ✓`);
   }
 
   function updateProgress() {
@@ -608,33 +542,38 @@ const VideoPlayer = (() => {
 
   // ─── Public API ───────────────────────────────────────────────────────────
   async function open(post, viewerContentEl) {
+    PL('open', `══ APRO VIEWER ══ id=${post.id} platform=${post.platform}`);
+    PL('open', `URL: ${post.url}`);
+    PL('open', `mediaType: ${post.mediaType} — quality: ${currentQuality}p`);
+
     currentPost = post;
     videoEl = null;
     currentQuality = '720';
     if (document._mvKeyHandler) {
       document.removeEventListener('keydown', document._mvKeyHandler);
+      PL('open', 'Rimosso keyHandler precedente');
     }
 
-    // Build player HTML
     viewerContentEl.innerHTML = buildPlayerHTML(post);
     showLoading('Avvio riproduzione…', 'Analisi piattaforma…');
 
-    const platform = post.platform;
-    const url = post.url;
+    const { platform, url } = post;
 
-    // Spotify → sempre embed
+    // Spotify → sempre embed (nessun stream audio diretto disponibile)
     if (platform === 'spotify') {
+      PL('open', 'Spotify → embed-only → chiamo _viewerFallbackEmbed');
       cleanup();
       window._viewerFallbackEmbed(post);
       return;
     }
 
-    // Usa il modulo Extractor universale
+    PL('open', `Chiamo Extractor.extract(url, platform="${platform}", quality="${currentQuality}")`);
+    PL('open', `Extractor proverà: fast-path piattaforma → Cobalt → yt-dlp WASM`);
+
     const result = await Extractor.extract(
-      url,
-      platform,
-      currentQuality,
+      url, platform, currentQuality,
       (msg, sub) => {
+        PL('open·progress', `${msg} ${sub||''}`);
         const textEl = document.getElementById('mv-loading-text');
         const subEl  = document.getElementById('mv-loading-sub');
         if (textEl) textEl.textContent = msg;
@@ -642,30 +581,35 @@ const VideoPlayer = (() => {
       }
     );
 
+    PL('open', `Extractor.extract() completato — risultato:`, result);
+
     if (!result) {
+      PL('open', 'Risultato null → nessun metodo ha funzionato → mostro errore');
       showError('Nessuno stream trovato. Prova "Usa embed" o apri l\'originale.');
       return;
     }
 
-    // Embed-only (Spotify, Twitch ecc.)
     if (result.embedOnly) {
+      PL('open', `embedOnly=true (${platform}) → fallback embed iframe`);
       cleanup();
       window._viewerFallbackEmbed(post);
       return;
     }
 
-    // Picker (es. Twitter con più video)
     if (result.picker) {
+      PL('open', `Picker con ${result.picker.length} stream → mostro selettore`);
       showPicker(result.picker);
       return;
     }
 
-    // URL diretto → riproduci
     if (result.url) {
+      PL('open', `URL trovato (${result.url.length} char) → chiamo loadVideoUrl()`);
+      PL('open', `IMPORTANTE: URL va nel <video src> SENZA proxy — NO corsproxy, NO allorigins`);
       loadVideoUrl(result.url);
       return;
     }
 
+    PL('open', 'result senza url né picker né embedOnly → mostro errore');
     showError('Formato non supportato. Usa "Usa embed" o apri l\'originale.');
   }
 
