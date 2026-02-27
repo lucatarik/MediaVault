@@ -399,7 +399,7 @@ const VideoPlayer = (() => {
     // Dopo setupVideoEvents(), videoEl punta al nodo clonato nel DOM
     PL('loadVideoUrl', `Imposto src sul nodo clonato: "${url.slice(0, 100)}…"`);
     videoEl.removeAttribute('src'); // pulisci attributo residuo se c'era
-    if (typeof url =='undefined' || url.length == 0)
+    if (typeof url =='undefined' || url.length == 0 || url == location.href)
           return PL('loadVideoUrl', `videoEl.src nullo, ritorno`);
     videoEl.src = url;
     if (startTime > 0) videoEl.currentTime = startTime;
