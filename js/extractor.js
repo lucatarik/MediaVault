@@ -8,7 +8,7 @@
  *   ✗ corsproxy.io: MAI USATO in nessun caso
  *
  * PIPELINE per piattaforma:
- *   YouTube   → [1] Invidious API (googlevideo = CORS nativo, no proxy) → [2] yt-dlp WASM
+ *   YouTube   → [1] Cobalt → [2] yt-dlp WASM
  *   Vimeo     → [1] player config API + CF Worker → [2] yt-dlp WASM
  *   Reddit    → [1] .json API (CORS nativo) + CF Worker → [2] Cobalt
  *   Instagram → [1] vxinstagram + CF Worker → [2] Cobalt → [3] embedOnly
@@ -144,74 +144,9 @@ const Extractor = (() => {
     GE(); return cfUrl(rawUrl);
   }
 
-  // ─── YOUTUBE via Invidious API ─────────────────────────────────────────────
-  // Invidious: GET /api/v1/videos/{id} → formatStreams[] (video+audio combinati).
-  // URL CDN: googlevideo.com → ha CORS nativo → nessun proxy video necessario.
-  const INVIDIOUS_INSTANCES = [
-    'https://inv.nadeko.net',
-    'https://invidious.privacydev.net',
-    'https://yt.artemislena.eu',
-    'https://invidious.flokinet.to',
-    'https://iv.melmac.space',
-    'https://invidious.nerdvpn.de',
-  ];
-
-  function extractYouTubeId(url) {
-    const m = url.match(/(?:v=|youtu\.be\/|shorts\/|embed\/)([a-zA-Z0-9_-]{11})/);
-    L('extractYouTubeId', `"${url.slice(0,60)}" → ID=${m?.[1]||'NON TROVATO'}`);
-    return m ? m[1] : null;
-  }
-
-  async function extractYouTube(url, quality = '720', onProgress) {
-    const FN = 'extractYouTube';
-    G(FN, `YouTube: ${url} [${quality}p]`);
-    L(FN, `LOGICA: Invidious /api/v1/videos/{id} → formatStreams[] → URL googlevideo.com (CORS nativo → no proxy video)`);
-    const id = extractYouTubeId(url);
-    if (!id) { E(FN,'ID non trovato'); GE(); return null; }
-    L(FN, `Video ID: "${id}"`);
-
-    for (let i = 0; i < INVIDIOUS_INSTANCES.length; i++) {
-      const inst = INVIDIOUS_INSTANCES[i];
-      const apiUrl = `${inst}/api/v1/videos/${id}`;
-      onProgress?.(`YouTube · Invidious ${i+1}/${INVIDIOUS_INSTANCES.length}…`);
-      L(FN, `[${i+1}/${INVIDIOUS_INSTANCES.length}] Istanza: ${inst}`);
-      L(FN, `[${i+1}] API: ${apiUrl}`);
-      try {
-        let data = null;
-        L(FN, `[${i+1}] Provo fetch diretto (alcune istanze hanno CORS aperto)…`);
-        try {
-          const r = await fetch(apiUrl, { headers:{'Accept':'application/json'}, signal: AbortSignal.timeout(6000) });
-          L(FN, `[${i+1}] Fetch diretto → HTTP ${r.status}`);
-          if (r.ok) { data = await r.json(); L(FN, `[${i+1}] ✓ Fetch diretto riuscito`); }
-          else W(FN, `[${i+1}] HTTP ${r.status} → provo proxyFetch via CF Worker`);
-        } catch(e) { W(FN, `[${i+1}] Fetch diretto fallito: ${e.message} → proxyFetch`); }
-
-        if (!data) {
-          L(FN, `[${i+1}] Fetch via CF Worker (proxyFetch)…`);
-          data = await proxyFetch(apiUrl, true);
-        }
-        if (!data) { W(FN, `[${i+1}] Nessun dato da ${inst} → prossima istanza`); continue; }
-
-        L(FN, `[${i+1}] Dati ricevuti: title="${data.title?.slice(0,40)}" formatStreams=${data.formatStreams?.length||0} adaptiveFormats=${data.adaptiveFormats?.length||0}`);
-        const streams = (data.formatStreams||[]).filter(f=>f.url && f.type?.includes('video'));
-        L(FN, `[${i+1}] formatStreams video+audio: ${streams.length}`);
-        streams.forEach((s,idx) => L(FN, `  [${idx}] quality=${s.quality} container=${s.container}`));
-
-        const qNum = parseInt(quality);
-        const best = streams.sort((a,b)=>Math.abs((parseInt(a.quality)||0)-qNum)-Math.abs((parseInt(b.quality)||0)-qNum))[0]
-          || data.adaptiveFormats?.find(f=>f.url && f.type?.includes('video'));
-
-        if (best?.url) {
-          L(FN, `✓ SCELTO: quality=${best.quality||'?'} container=${best.container||'?'}`);
-          L(FN, `URL googlevideo.com (CORS nativo → <video src> diretto, NO CF Worker): ${best.url.slice(0,100)}…`);
-          GE(); return { url: best.url, quality: best.quality, needsProxy: false };
-        }
-        W(FN, `[${i+1}] Nessuno stream usabile su ${inst}`);
-      } catch(e) { E(FN, `[${i+1}] Eccezione: ${e.message}`); }
-    }
-    E(FN, `TUTTE le ${INVIDIOUS_INSTANCES.length} istanze Invidious fallite`);
-    GE(); return null;
-  }
+  // ─── YOUTUBE ──────────────────────────────────────────────────────────────
+  // Invidious rimosso — YouTube viene gestito da Cobalt (fast-path) o yt-dlp (fallback).
+  // Cobalt supporta YouTube nativamente inclusi Shorts e video normali.
 
   // ─── VIMEO via player config API ──────────────────────────────────────────
   // GET player.vimeo.com/video/{id}/config → progressive[] (video+audio CDN).
@@ -477,22 +412,50 @@ const Extractor = (() => {
     _pyodide = await window.loadPyodide({ indexURL:'https://cdn.jsdelivr.net/pyodide/v0.27.4/full/' });
     L(FN, `Step 2 ✓ Python: ${_pyodide.runPython('import sys; sys.version')}`);
 
-    // Step 3: micropip
+    // Step 3: micropip (ssl viene mockato in Python nel prossimo step)
     L(FN,'Step 3: carico micropip…');
-    onProgress?.('Installazione yt-dlp…','Download package Python puro');
+    onProgress?.('Caricamento micropip…', '');
     await _pyodide.loadPackage('micropip');
     L(FN,'Step 3 ✓ micropip caricato');
 
-    // Step 4: yt-dlp
-    L(FN,'Step 4: installo yt-dlp via micropip…');
+    // Step 4: mock ssl + installa yt-dlp
+    // ssl è "unvendored" in Pyodide 0.27 e NON disponibile via loadPackage su tutti i build.
+    // Soluzione: iniettare un modulo ssl fittizio in sys.modules PRIMA che yt-dlp lo importi.
+    // yt-dlp usa ssl solo per verificare certificati HTTPS — nel browser tutto il networking
+    // passa per fetch() (già secure) quindi ssl non serve davvero a runtime.
+    L(FN,'Step 4: mock ssl → installa yt-dlp via micropip…');
+    L(FN,'LOGICA: ssl è unvendored in Pyodide — mocchiamo il modulo prima che yt-dlp lo importi');
+    onProgress?.('Installazione yt-dlp…', 'mock ssl + download package');
     await _pyodide.runPythonAsync(`
-import micropip
+import sys, types, micropip
+
+# ── Mock ssl ──────────────────────────────────────────────────────────────────
+# Crea un modulo ssl fittizio con gli attributi minimi che yt-dlp si aspetta.
+# In ambiente WASM/browser il networking reale passa per fetch() — ssl non è usato.
+print('[Pyodide-Step4] Injecting mock ssl module into sys.modules...')
+_ssl_mock = types.ModuleType('ssl')
+_ssl_mock.SSLContext          = object
+_ssl_mock.SSLError            = Exception
+_ssl_mock.CERT_NONE           = 0
+_ssl_mock.CERT_OPTIONAL       = 1
+_ssl_mock.CERT_REQUIRED       = 2
+_ssl_mock.PROTOCOL_TLS_CLIENT = 16
+_ssl_mock.PROTOCOL_TLS        = 2
+_ssl_mock.OP_NO_SSLv2         = 0
+_ssl_mock.OP_NO_SSLv3         = 0
+_ssl_mock.HAS_SNI             = True
+_ssl_mock.create_default_context = lambda *a, **kw: object()
+_ssl_mock.wrap_socket         = lambda *a, **kw: None
+sys.modules['ssl'] = _ssl_mock
+print('[Pyodide-Step4] ssl mock OK')
+
+# ── Installa yt-dlp ───────────────────────────────────────────────────────────
 print('[Pyodide-Step4] Installazione yt-dlp...')
 await micropip.install('yt-dlp')
 import yt_dlp
 print(f'[Pyodide-Step4] yt-dlp {yt_dlp.version.__version__} installato OK')
 `);
-    L(FN,'Step 4 ✓ yt-dlp installato');
+    L(FN,'Step 4 ✓ ssl mockato + yt-dlp installato');
 
     // Step 5: patch urllib con CF Worker (+ allorigins opzionale)
     L(FN,'Step 5: patch urllib.urlopen con CF Worker…');
@@ -645,10 +608,11 @@ _res
       result = { embedOnly: true };
     }
     else if (platform === 'youtube' || /youtu\.?be/.test(url)) {
-      L(FN, `PERCORSO → YouTube: [1] Invidious → [2] yt-dlp WASM`);
-      onProgress?.('YouTube · Invidious…');
-      result = await extractYouTube(url, quality, onProgress);
-      if (!result) { L(FN,'Invidious fallito → yt-dlp'); result = await extractWithYtDlp(url, quality, onProgress); }
+      L(FN, `PERCORSO → YouTube: [1] Cobalt → [2] yt-dlp WASM`);
+      L(FN, `NOTA: Invidious rimosso — Cobalt gestisce YouTube, Shorts e playlist direttamente`);
+      onProgress?.('YouTube · Cobalt…');
+      result = await extractViaCobalt(url, quality, onProgress);
+      if (!result) { L(FN,'Cobalt fallito → yt-dlp WASM'); result = await extractWithYtDlp(url, quality, onProgress); }
     }
     else if (platform === 'vimeo' || url.includes('vimeo.com')) {
       L(FN, `PERCORSO → Vimeo: [1] config API → [2] yt-dlp WASM`);
