@@ -689,25 +689,43 @@ function openViewer(id) {
 }
 
 function _renderEmbedFallback(post, content) {
-  if (post.embedUrl) {
-    content.innerHTML = '';
-    const iframe = document.createElement('iframe');
-    iframe.src = post.embedUrl;
-    iframe.allowFullscreen = true;
-    iframe.allow = 'autoplay; encrypted-media; fullscreen; picture-in-picture';
-    // vxinstagram / Instagram Reels sono verticali (9:16), gli altri 16:9
-    const isVertical = post._vxEmbed ||
-      (post.platform === 'instagram' && /reel|reels/.test(post.url));
-    iframe.style.cssText = isVertical
-      ? 'width:100%;max-width:420px;aspect-ratio:9/16;border:none;border-radius:var(--radius);display:block;margin:0 auto;'
-      : 'width:100%;aspect-ratio:16/9;border:none;border-radius:var(--radius);';
-    content.appendChild(iframe);
-  } else if (post.platform === 'twitter') {
+  if (!post || !content) return;
+
+  const url = post.url || '';
+  const platform = post.platform || 'web';
+
+  // ── costruisci embedUrl inline se mancante (es. post salvati prima del fix) ──
+  let embedUrl = post.embedUrl || null;
+  if (!embedUrl) {
+    if (platform === 'youtube' || /youtu\.?be/.test(url)) {
+      const m = url.match(/(?:v=|youtu\.be\/|\/embed\/|\/shorts\/)([a-zA-Z0-9_-]{11})/);
+      if (m) embedUrl = `https://www.youtube.com/embed/${m[1]}?rel=0&modestbranding=1`;
+    } else if (platform === 'vimeo' || url.includes('vimeo.com')) {
+      const m = url.match(/vimeo\.com\/(?:video\/)?(\d+)/);
+      if (m) embedUrl = `https://player.vimeo.com/video/${m[1]}?dnt=1`;
+    } else if (platform === 'tiktok' || url.includes('tiktok.com')) {
+      const m = url.match(/\/video\/(\d+)/);
+      if (m) embedUrl = `https://www.tiktok.com/embed/v2/${m[1]}`;
+    } else if (platform === 'instagram' || url.includes('instagram.com')) {
+      try { const u = new URL(url); embedUrl = `https://www.instagram.com${u.pathname}embed/`; } catch {}
+    } else if (platform === 'facebook' || /facebook\.com|fb\.watch/.test(url)) {
+      embedUrl = `https://www.facebook.com/plugins/post.php?href=${encodeURIComponent(url)}&show_text=true&width=500`;
+    } else if (platform === 'reddit' || url.includes('reddit.com')) {
+      // Reddit non ha iframe embed — usiamo link preview
+      embedUrl = null;
+    } else if (platform === 'spotify' || url.includes('spotify.com')) {
+      const m = url.match(/spotify\.com\/(track|album|playlist|episode)\/([a-zA-Z0-9]+)/);
+      if (m) embedUrl = `https://open.spotify.com/embed/${m[1]}/${m[2]}`;
+    }
+  }
+
+  // ── Twitter / X ─────────────────────────────────────────────────────────────
+  if (platform === 'twitter' || /twitter\.com|x\.com/.test(url)) {
     content.innerHTML = `
       <div class="twitter-embed">
-        <blockquote class="twitter-tweet" data-theme="dark"><a href="${post.url}"></a></blockquote>
+        <blockquote class="twitter-tweet" data-theme="dark"><a href="${url}"></a></blockquote>
         <div style="padding:16px;text-align:center">
-          <a href="${post.url}" target="_blank" rel="noopener" class="btn-primary" style="display:inline-flex">
+          <a href="${url}" target="_blank" rel="noopener" class="btn-primary" style="display:inline-flex">
             <i class="fab fa-x-twitter"></i> Apri su X/Twitter
           </a>
         </div>
@@ -715,9 +733,28 @@ function _renderEmbedFallback(post, content) {
     if (!document.querySelector('script[src*="platform.twitter"]')) {
       const s = document.createElement('script'); s.src = 'https://platform.twitter.com/widgets.js'; s.async = true; document.head.appendChild(s);
     } else if (window.twttr) window.twttr.widgets.load(content);
-  } else {
-    _renderLinkPreview(post, content);
+    return;
   }
+
+  // ── iframe embed ─────────────────────────────────────────────────────────────
+  if (embedUrl) {
+    content.innerHTML = '';
+    const iframe = document.createElement('iframe');
+    iframe.src = embedUrl;
+    iframe.allowFullscreen = true;
+    iframe.allow = 'autoplay; encrypted-media; fullscreen; picture-in-picture';
+    const isVertical = post._vxEmbed ||
+      (platform === 'instagram' && /reel|reels|stories/.test(url)) ||
+      platform === 'tiktok';
+    iframe.style.cssText = isVertical
+      ? 'width:100%;max-width:420px;aspect-ratio:9/16;border:none;border-radius:var(--radius);display:block;margin:0 auto;'
+      : 'width:100%;aspect-ratio:16/9;border:none;border-radius:var(--radius);';
+    content.appendChild(iframe);
+    return;
+  }
+
+  // ── fallback: link preview ───────────────────────────────────────────────────
+  _renderLinkPreview(post, content);
 }
 
 function _renderLinkPreview(post, content) {
