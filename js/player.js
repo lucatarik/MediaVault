@@ -615,9 +615,9 @@ const VideoPlayer = (() => {
 
   function fallbackEmbed() {
     if (!currentPost) return;
+    const post = currentPost; // salva riferimento prima che cleanup() lo azzeri
     cleanup();
-    // Trigger embed fallback in app.js
-    if (window._viewerFallbackEmbed) window._viewerFallbackEmbed(currentPost);
+    if (window._viewerFallbackEmbed) window._viewerFallbackEmbed(post);
   }
 
   function cleanup() {
