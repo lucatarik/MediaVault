@@ -390,14 +390,20 @@ const VideoPlayer = (() => {
     videoWrap.style.display = 'block';
     videoWrap.style.opacity = '0';
 
+    // IMPORTANTE: prima setupVideoEvents() (che fa cloneNode e aggiorna videoEl),
+    // POI impostiamo src — così il src finisce sul nodo corretto (il clone)
+    // e non sul nodo originale che viene rimosso dal DOM durante il clone.
     videoEl = document.getElementById('mv-video');
-    PL('loadVideoUrl', `Imposto videoEl.src = "${url.slice(0, 100)}…"`);
-    videoEl.src = url;
-    videoEl.currentTime = startTime;
-
+    PL('loadVideoUrl', `videoEl trovato: id="${videoEl?.id}" — ora chiamo setupVideoEvents() (cloneNode interno)`);
     setupVideoEvents();
+    // Dopo setupVideoEvents(), videoEl punta al nodo clonato nel DOM
+    PL('loadVideoUrl', `Imposto src sul nodo clonato: "${url.slice(0, 100)}…"`);
+    videoEl.removeAttribute('src'); // pulisci attributo residuo se c'era
+    videoEl.src = url;
+    if (startTime > 0) videoEl.currentTime = startTime;
+    videoEl.load(); // forza il browser a riconoscere il nuovo src
 
-    PL('loadVideoUrl', `Chiamo videoEl.play() — se autoplay è bloccato dal browser mostro il tasto play`);
+    PL('loadVideoUrl', `videoEl.src impostato ✓ — chiamo play()`);
     videoEl.play().then(() => {
       PL('loadVideoUrl', `play() riuscito ✓ — fade-in del player`);
       videoWrap.style.transition = 'opacity 0.3s';
