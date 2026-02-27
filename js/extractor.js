@@ -567,52 +567,85 @@ print(f'[Pyodide-Step4] yt-dlp {yt_dlp.version.__version__} installato OK')
 `);
     L(FN,'Step 4 ✓ ssl mockato + yt-dlp installato');
 
-    // Step 5: patch urllib con CF Worker (+ allorigins opzionale)
-    L(FN,'Step 5: patch urllib.urlopen con CF Worker…');
-    L(FN,'LOGICA: ogni richiesta HTTP interna di yt-dlp viene redirezionata via CF Worker');
-    const useAllorigins = MV.getProxySettings().useAlloriginsFallback;
-    L(FN, `useAllorigins in Python patch: ${useAllorigins}`);
-    _pyodide.globals.set('_CF_BASE_PY',    CF_BASE + '/?url=');
-    _pyodide.globals.set('_CF_KEY_PY',     '&key=' + CF_KEY);
-    _pyodide.globals.set('_USE_ALLORIGINS_PY', useAllorigins);
+    // Step 5: patch urllib con XHR sincrono via CF Worker
+    // PERCHÉ XHR e non _orig(urllib): Pyodide gira in WASM e non può aprire socket TCP
+    // direttamente. L'unico modo per fare HTTP in un Web Worker Pyodide è usare
+    // js.XMLHttpRequest (sincrono — legale nei Web Worker) che usa la fetch API del browser.
+    L(FN,'Step 5: patch urllib.urlopen con XHR sincrono via CF Worker…');
+    L(FN,'LOGICA: js.XMLHttpRequest sincrono (solo nei Web Worker) → CF Worker relay → YouTube/etc');
+    _pyodide.globals.set('_CF_BASE_PY', CF_BASE + '/?url=');
+    _pyodide.globals.set('_CF_KEY_PY',  '&key=' + CF_KEY);
 
     await _pyodide.runPythonAsync(`
-import urllib.request as _ur, urllib.parse as _up, urllib.error
-
-_PROXY_BASES = [_CF_BASE_PY]
-if _USE_ALLORIGINS_PY:
-    _PROXY_BASES.append("https://api.allorigins.win/raw?url=")
-    print(f'[urllib-patch] allorigins aggiunto come fallback')
-
-print(f'[urllib-patch] Proxy configurati: {_PROXY_BASES}')
-_orig = _ur.urlopen
+import js, io, email.message
+import urllib.request as _ur
+import urllib.parse  as _up
+from urllib.error    import URLError, HTTPError
+from urllib.response import addinfourl
 
 def _patched(url_or_req, data=None, timeout=30, **kw):
-    raw = url_or_req if isinstance(url_or_req, str) else getattr(url_or_req, 'full_url', str(url_or_req))
-    print(f'[urllib-patch] Intercettato: {raw[:80]}')
-    last = None
-    for i, base in enumerate(_PROXY_BASES):
-        enc = _up.quote(raw, safe='')
-        suffix = _CF_KEY_PY if 'lucatarik' in base else ''
-        pu = base + enc + suffix
-        print(f'[urllib-patch] Proxy {i+1}/{len(_PROXY_BASES)}: {pu[:80]}')
-        try:
-            if isinstance(url_or_req, str):
-                return _orig(pu, data=data, timeout=timeout)
-            nr = _ur.Request(
-                pu,
-                data=getattr(url_or_req, 'data', None),
-                headers=dict(getattr(url_or_req, 'headers', {})),
-                method=url_or_req.get_method() if hasattr(url_or_req, 'get_method') else 'GET'
-            )
-            return _orig(nr, timeout=timeout)
-        except Exception as e:
-            print(f'[urllib-patch] Proxy {i+1} fallito: {e}')
-            last = e
-    raise last or urllib.error.URLError('Tutti i proxy falliti')
+    # ── estrai URL e metadati dalla richiesta ──────────────────────────────
+    if isinstance(url_or_req, str):
+        raw     = url_or_req
+        method  = 'POST' if data else 'GET'
+        req_hdr = {}
+        req_data = data
+    else:
+        raw      = getattr(url_or_req, 'full_url', str(url_or_req))
+        method   = url_or_req.get_method() if hasattr(url_or_req, 'get_method') else ('POST' if getattr(url_or_req, 'data', None) else 'GET')
+        req_hdr  = dict(getattr(url_or_req, 'headers', {}))
+        req_data = getattr(url_or_req, 'data', None)
+
+    # ── costruisci URL proxy CF Worker ─────────────────────────────────────
+    enc      = _up.quote(raw, safe='')
+    pu       = _CF_BASE_PY + enc + _CF_KEY_PY
+    print(f'[urllib-patch] XHR {method} → {pu[:100]}')
+
+    try:
+        xhr = js.XMLHttpRequest.new()
+        xhr.open(method, pu, False)          # False = SINCRONO (ok nei Web Worker)
+        xhr.responseType = 'arraybuffer'
+        # propaga gli header originali (User-Agent, Accept, ecc.)
+        for k, v in req_hdr.items():
+            try: xhr.setRequestHeader(str(k), str(v))
+            except: pass
+        # invia; req_data può essere None, str o bytes
+        if req_data is not None:
+            if isinstance(req_data, (bytes, bytearray)):
+                xhr.send(req_data)
+            else:
+                xhr.send(str(req_data))
+        else:
+            xhr.send()
+
+        status = xhr.status
+        print(f'[urllib-patch] HTTP {status} ← {raw[:60]}')
+
+        if status >= 400:
+            raise HTTPError(raw, status, xhr.statusText or '', {}, None)
+
+        # converte ArrayBuffer → bytes Python
+        buf     = xhr.response
+        content = bytes(js.Uint8Array.new(buf).to_py())
+
+        # costruisci oggetto headers compatibile urllib
+        msg = email.message.Message()
+        hdrs_str = xhr.getAllResponseHeaders() or ''
+        for line in hdrs_str.strip().split('\r\n'):
+            if ':' in line:
+                k2, v2 = line.split(':', 1)
+                msg[k2.strip()] = v2.strip()
+
+        return addinfourl(io.BytesIO(content), msg, raw, status)
+
+    except (HTTPError, URLError):
+        raise
+    except Exception as e:
+        print(f'[urllib-patch] XHR errore: {e}')
+        raise URLError(f'XHR via CF Worker fallito: {e}') from e
 
 _ur.urlopen = _patched
-print('[urllib-patch] urllib.urlopen patchato con CF Worker')
+print('[urllib-patch] OK — urllib.urlopen sostituito con XHR sincrono via CF Worker')
 `);
 
     _ytdlpReady = true;   // <-- JS, non Python!
