@@ -1,21 +1,8 @@
 /**
- * VideoPlayer — Cobalt.tools integration + custom HTML5 player
- *
- * Cobalt.tools è un servizio open-source gratuito che estrae URL diretti
- * di video da YouTube, TikTok, Instagram, Twitter, Vimeo, Reddit, ecc.
- * https://cobalt.tools / https://github.com/imputnet/cobalt
+ * VideoPlayer — custom HTML5 player
  */
 
 const VideoPlayer = (() => {
-
-  // ─── Cobalt instances (fallback chain) ────────────────────────────────────
-  // Istanze pubbliche della community — se una è giù, proviamo la prossima
-  const COBALT_INSTANCES = [
-    'https://api.cobalt.tools',
-    'https://cobalt.api.timelessnesses.me',
-    'https://cobalt.catto.zip',
-    'https://co.wuk.sh',
-  ];
 
   const QUALITY_OPTIONS = ['1080', '720', '480', '360'];
 
@@ -25,73 +12,6 @@ const VideoPlayer = (() => {
   let hideControlsTimer = null;
   let currentQuality = '720';
   let videoAbortController = null; // AbortController attivo per i listener del <video>
-
-  // ─── Cobalt API ───────────────────────────────────────────────────────────
-  async function fetchFromCobalt(url, quality = '720', instanceIdx = 0) {
-    if (instanceIdx >= COBALT_INSTANCES.length) return null;
-    const instance = COBALT_INSTANCES[instanceIdx];
-
-    try {
-      const res = await fetch(instance, {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          url,
-          videoQuality: quality,
-          audioFormat: 'mp3',
-          filenameStyle: 'basic',
-          downloadMode: 'auto',
-          twitterGif: false,
-        }),
-        signal: AbortSignal.timeout(8000),
-      });
-
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-
-      // Handle response types
-      if (data.status === 'error') {
-        console.warn(`Cobalt ${instance} error:`, data.error?.code);
-        return null;
-      }
-
-      if (data.status === 'stream' || data.status === 'redirect' || data.status === 'tunnel') {
-        return { type: 'single', url: data.url };
-      }
-
-      if (data.status === 'picker') {
-        // Multiple streams available (e.g. Twitter with multiple videos)
-        const videos = data.picker.filter(i => i.type === 'video' || !i.type);
-        if (videos.length > 0) return { type: 'picker', items: videos };
-        return null;
-      }
-
-      return null;
-
-    } catch (e) {
-      console.warn(`Cobalt instance ${instance} failed:`, e.message);
-      // Try next instance
-      return fetchFromCobalt(url, quality, instanceIdx + 1);
-    }
-  }
-
-  // Check which platforms cobalt supports
-  function isCobaltSupported(platform, url) {
-    const supported = [
-      'youtube', 'tiktok', 'instagram', 'twitter', 'vimeo',
-      'reddit', 'twitch', 'facebook', 'video'
-    ];
-    // Also check by URL pattern
-    const urlPatterns = [
-      /youtube\.com/, /youtu\.be/, /tiktok\.com/, /instagram\.com/,
-      /twitter\.com/, /x\.com/, /vimeo\.com/, /reddit\.com/,
-      /twitch\.tv/, /facebook\.com/, /fb\.watch/,
-    ];
-    return supported.includes(platform) || urlPatterns.some(p => p.test(url));
-  }
 
   // ─── Custom Player HTML ───────────────────────────────────────────────────
   function buildPlayerHTML(post) {
@@ -105,7 +25,7 @@ const VideoPlayer = (() => {
           <div class="mv-loading-overlay">
             <div class="mv-loading-spinner"></div>
             <p class="mv-loading-text" id="mv-loading-text">Avvio riproduzione…</p>
-            <p class="mv-loading-sub" id="mv-loading-sub">Recupero stream diretto via Cobalt</p>
+            <p class="mv-loading-sub" id="mv-loading-sub">Recupero stream diretto via yt-dlp</p>
           </div>
         </div>
 
@@ -641,7 +561,7 @@ const VideoPlayer = (() => {
     }
 
     PL('open', `Chiamo Extractor.extract(url, platform="${platform}", quality="${currentQuality}")`);
-    PL('open', `Extractor proverà: fast-path piattaforma → Cobalt → yt-dlp WASM`);
+    PL('open', `Extractor proverà: fast-path piattaforma → yt-dlp WASM`);
 
     const result = await Extractor.extract(
       url, platform, currentQuality,
@@ -688,8 +608,7 @@ const VideoPlayer = (() => {
 
   function retryDirect() {
     if (currentPost) {
-      showLoading('Nuovo tentativo…', 'Provo un\'altra istanza Cobalt');
-      // Force next instance by clearing cache (just retry from 0, cobalt will try all)
+      showLoading('Nuovo tentativo…', 'Riprovo con yt-dlp…');
       setTimeout(() => open(currentPost, document.getElementById('viewer-content')), 200);
     }
   }

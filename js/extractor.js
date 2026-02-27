@@ -8,11 +8,11 @@
  *   ✗ corsproxy.io: MAI USATO in nessun caso
  *
  * PIPELINE per piattaforma:
- *   YouTube   → [1] Cobalt → [2] yt-dlp WASM
+ *   YouTube   → [1] yt-dlp WASM
  *   Vimeo     → [1] player config API + CF Worker → [2] yt-dlp WASM
- *   Reddit    → [1] .json API (CORS nativo) + CF Worker → [2] Cobalt
- *   Instagram → [1] vxinstagram + CF Worker → [2] Cobalt → [3] embedOnly
- *   TikTok/Twitter/Facebook → [1] Cobalt + CF Worker → [2] yt-dlp WASM
+ *   Reddit    → [1] .json API (CORS nativo) + CF Worker → [2] yt-dlp WASM
+ *   Instagram → [1] vxinstagram + CF Worker → [2] embedOnly
+ *   TikTok/Twitter/Facebook → [1] yt-dlp WASM
  *   Tutto il resto → yt-dlp WASM (Pyodide, lazy load ~40MB, cached)
  */
 
@@ -144,9 +144,7 @@ const Extractor = (() => {
     GE(); return cfUrl(rawUrl);
   }
 
-  // ─── YOUTUBE ──────────────────────────────────────────────────────────────
-  // Invidious rimosso — YouTube viene gestito da Cobalt (fast-path) o yt-dlp (fallback).
-  // Cobalt supporta YouTube nativamente inclusi Shorts e video normali.
+  // ─── YOUTUBE → yt-dlp WASM ───────────────────────────────────────────────
 
   // ─── VIMEO via player config API ──────────────────────────────────────────
   // GET player.vimeo.com/video/{id}/config → progressive[] (video+audio CDN).
@@ -313,64 +311,7 @@ const Extractor = (() => {
     GE(); return { url: proxied, needsProxy: true };
   }
 
-  // ─── COBALT API ────────────────────────────────────────────────────────────
-  // POST /  → status: stream/redirect/tunnel → URL diretto → CF Worker relay
-  //        → status: picker → array stream disponibili
-  const COBALT_INSTANCES = [
-    'https://api.cobalt.tools',
-    'https://cobalt.api.timelessnesses.me',
-    'https://cobalt.catto.zip',
-    'https://co.wuk.sh',
-  ];
-
-  async function extractViaCobalt(url, quality = '720', onProgress) {
-    const FN = 'extractViaCobalt';
-    G(FN, `Cobalt: ${url} [${quality}p]`);
-    L(FN, `LOGICA: POST a istanza Cobalt → ricevo stream URL → CF Worker relay per CORS`);
-    L(FN, `Istanze disponibili: ${COBALT_INSTANCES.length} — provo in cascata`);
-
-    for (let i = 0; i < COBALT_INSTANCES.length; i++) {
-      const inst = COBALT_INSTANCES[i];
-      onProgress?.(`Cobalt ${i+1}/${COBALT_INSTANCES.length}…`);
-      L(FN, `[${i+1}/${COBALT_INSTANCES.length}] POST → ${inst}`);
-      const payload = { url, videoQuality: quality, audioFormat:'mp3', filenameStyle:'basic', downloadMode:'auto', twitterGif:false };
-      L(FN, `[${i+1}] Payload:`, payload);
-      try {
-        const res = await fetch(inst, {
-          method:'POST',
-          headers:{'Accept':'application/json','Content-Type':'application/json'},
-          body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(10000),
-        });
-        L(FN, `[${i+1}] HTTP ${res.status} ${res.statusText}`);
-        if (!res.ok) { W(FN, `[${i+1}] HTTP ${res.status} → prossima istanza`); continue; }
-        const data = await res.json();
-        L(FN, `[${i+1}] Risposta:`, { status: data.status, hasUrl: !!data.url, pickerLen: data.picker?.length });
-
-        if (data.status === 'error') {
-          W(FN, `[${i+1}] Cobalt error: ${JSON.stringify(data.error)} → prossima istanza`);
-          continue;
-        }
-        if (['stream','redirect','tunnel'].includes(data.status)) {
-          L(FN, `[${i+1}] ✓ status="${data.status}" → url: ${data.url?.slice(0,80)}…`);
-          L(FN, `[${i+1}] CF Worker relay per CORS…`);
-          const proxied = await proxyVideoUrl(data.url);
-          L(FN, `[${i+1}] URL finale: ${proxied?.slice(0,80)}…`);
-          GE(); return { url: proxied||data.url, needsProxy: true };
-        }
-        if (data.status === 'picker' && data.picker?.length) {
-          L(FN, `[${i+1}] ✓ status="picker" → ${data.picker.length} stream`);
-          data.picker.forEach((item,idx) => L(FN, `  picker[${idx}]: ${item.url?.slice(0,60)}…`));
-          GE(); return { picker: data.picker };
-        }
-        W(FN, `[${i+1}] Status inatteso: "${data.status}" → prossima istanza`);
-      } catch(e) { E(FN, `[${i+1}] Eccezione su ${inst}: ${e.message}`); }
-    }
-    E(FN, `TUTTE le ${COBALT_INSTANCES.length} istanze Cobalt fallite`);
-    GE(); return null;
-  }
-
-  // ─── PYODIDE + yt-dlp (fallback universale WASM) ──────────────────────────
+  // ─── PYODIDE + yt-dlp (universale WASM) ──────────────────────────────────
   // loadPyodide():
   //   1. Carica script Pyodide da CDN (~40MB la prima volta, poi in cache SW)
   //   2. Inizializza CPython 3.12 in WASM
@@ -434,19 +375,40 @@ import sys, types, micropip
 # In ambiente WASM/browser il networking reale passa per fetch() — ssl non è usato.
 print('[Pyodide-Step4] Injecting mock ssl module into sys.modules...')
 _ssl_mock = types.ModuleType('ssl')
-_ssl_mock.SSLContext          = object
-_ssl_mock.SSLError            = Exception
+
+# SSLContext deve essere una vera classe che accetta argomenti posizionali
+# (yt-dlp chiama ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT) che fallisce se SSLContext = object)
+class _FakeSSLContext:
+    def __init__(self, protocol=None): pass
+    def load_verify_locations(self, *a, **kw): pass
+    def set_ciphers(self, *a, **kw): pass
+    def wrap_socket(self, sock, *a, **kw): return sock
+    def load_cert_chain(self, *a, **kw): pass
+    def set_alpn_protocols(self, *a, **kw): pass
+    check_hostname = False
+    verify_mode = 0
+
+_ssl_mock.SSLContext          = _FakeSSLContext
+_ssl_mock.SSLError            = OSError
+_ssl_mock.CertificateError    = ValueError
 _ssl_mock.CERT_NONE           = 0
 _ssl_mock.CERT_OPTIONAL       = 1
 _ssl_mock.CERT_REQUIRED       = 2
-_ssl_mock.PROTOCOL_TLS_CLIENT = 16
 _ssl_mock.PROTOCOL_TLS        = 2
-_ssl_mock.OP_NO_SSLv2         = 0
-_ssl_mock.OP_NO_SSLv3         = 0
+_ssl_mock.PROTOCOL_TLS_CLIENT = 16
+_ssl_mock.PROTOCOL_TLS_SERVER = 17
+_ssl_mock.PROTOCOL_SSLv23     = 2
+_ssl_mock.OP_NO_SSLv2         = 0x01000000
+_ssl_mock.OP_NO_SSLv3         = 0x02000000
+_ssl_mock.OP_NO_TLSv1         = 0x04000000
 _ssl_mock.HAS_SNI             = True
-_ssl_mock.create_default_context = lambda *a, **kw: object()
-_ssl_mock.wrap_socket         = lambda *a, **kw: None
-sys.modules['ssl'] = _ssl_mock
+_ssl_mock.HAS_ALPN            = True
+_ssl_mock.create_default_context = lambda *a, **kw: _FakeSSLContext()
+_ssl_mock.wrap_socket         = lambda sock, *a, **kw: sock
+_ssl_mock.match_hostname       = lambda cert, hostname: None
+_ssl_mock.DER_cert_to_PEM_cert = lambda der: ''
+sys.modules['ssl']  = _ssl_mock
+sys.modules['_ssl'] = _ssl_mock
 print('[Pyodide-Step4] ssl mock OK')
 
 # ── Installa yt-dlp ───────────────────────────────────────────────────────────
@@ -587,7 +549,6 @@ _res
 
   // ─── ROUTER PRINCIPALE ────────────────────────────────────────────────────
   const EMBED_ONLY  = ['spotify','twitch'];
-  const COBALT_PLATS = ['tiktok','twitter','facebook'];
 
   async function extract(url, platform, quality = '720', onProgress) {
     const FN = 'extract';
@@ -608,11 +569,9 @@ _res
       result = { embedOnly: true };
     }
     else if (platform === 'youtube' || /youtu\.?be/.test(url)) {
-      L(FN, `PERCORSO → YouTube: [1] Cobalt → [2] yt-dlp WASM`);
-      L(FN, `NOTA: Invidious rimosso — Cobalt gestisce YouTube, Shorts e playlist direttamente`);
-      onProgress?.('YouTube · Cobalt…');
-      result = await extractViaCobalt(url, quality, onProgress);
-      if (!result) { L(FN,'Cobalt fallito → yt-dlp WASM'); result = await extractWithYtDlp(url, quality, onProgress); }
+      L(FN, `PERCORSO → YouTube: yt-dlp WASM`);
+      onProgress?.('YouTube · yt-dlp…');
+      result = await extractWithYtDlp(url, quality, onProgress);
     }
     else if (platform === 'vimeo' || url.includes('vimeo.com')) {
       L(FN, `PERCORSO → Vimeo: [1] config API → [2] yt-dlp WASM`);
@@ -620,23 +579,17 @@ _res
       if (!result) { L(FN,'config API fallita → yt-dlp'); result = await extractWithYtDlp(url, quality, onProgress); }
     }
     else if (platform === 'reddit' || url.includes('reddit.com')) {
-      L(FN, `PERCORSO → Reddit: [1] .json API → [2] Cobalt`);
+      L(FN, `PERCORSO → Reddit: [1] .json API → [2] yt-dlp WASM`);
       result = await extractReddit(url, onProgress);
-      if (!result) { L(FN,'.json fallito → Cobalt'); result = await extractViaCobalt(url, quality, onProgress); }
+      if (!result) { L(FN,'.json fallito → yt-dlp'); result = await extractWithYtDlp(url, quality, onProgress); }
     }
     else if (platform === 'instagram' || /instagram\.com\/(reels?|p|tv|stories|share)\//.test(url)) {
-      L(FN, `PERCORSO → Instagram: [1] vxinstagram+CF Worker → [2] Cobalt → [3] embedOnly`);
+      L(FN, `PERCORSO → Instagram: [1] vxinstagram+CF Worker → [2] embedOnly`);
       result = await extractInstagram(url, onProgress);
-      if (!result) { L(FN,'vxinstagram fallito → Cobalt'); result = await extractViaCobalt(url, quality, onProgress); }
-      if (!result) { L(FN,'Cobalt fallito → embedOnly iframe'); result = { embedOnly: true }; }
-    }
-    else if (COBALT_PLATS.includes(platform)) {
-      L(FN, `PERCORSO → ${platform}: [1] Cobalt → [2] yt-dlp WASM`);
-      result = await extractViaCobalt(url, quality, onProgress);
-      if (!result) { L(FN,'Cobalt fallito → yt-dlp'); result = await extractWithYtDlp(url, quality, onProgress); }
+      if (!result) { L(FN,'vxinstagram fallito → embedOnly iframe'); result = { embedOnly: true }; }
     }
     else {
-      L(FN, `PERCORSO → "${platform}" senza fast-path → yt-dlp WASM universale (1000+ siti)`);
+      L(FN, `PERCORSO → "${platform}" → yt-dlp WASM universale (1000+ siti)`);
       result = await extractWithYtDlp(url, quality, onProgress);
     }
 
@@ -656,6 +609,6 @@ _res
   function getVxInstagramUrl(url) { return buildVxUrl(url); }
 
   L('init', '✓ Extractor pronto (CF Worker only — no corsproxy.io)');
-  return { extract, preloadPyodide, getVxInstagramUrl, extractViaCobalt };
+  return { extract, preloadPyodide, getVxInstagramUrl };
 
 })();
