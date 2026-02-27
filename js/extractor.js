@@ -631,7 +631,7 @@ def _patched(url_or_req, data=None, timeout=30, **kw):
         # costruisci oggetto headers compatibile urllib
         msg = email.message.Message()
         hdrs_str = xhr.getAllResponseHeaders() or ''
-        for line in hdrs_str.strip().split('\r\n'):
+        for line in hdrs_str.strip().splitlines():
             if ':' in line:
                 k2, v2 = line.split(':', 1)
                 msg[k2.strip()] = v2.strip()
