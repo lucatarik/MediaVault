@@ -24,6 +24,7 @@ const VideoPlayer = (() => {
   let videoEl = null;
   let hideControlsTimer = null;
   let currentQuality = '720';
+  let videoAbortController = null; // AbortController attivo per i listener del <video>
 
   // ─── Cobalt API ───────────────────────────────────────────────────────────
   async function fetchFromCobalt(url, quality = '720', instanceIdx = 0) {
@@ -399,13 +400,11 @@ const VideoPlayer = (() => {
     // Dopo setupVideoEvents(), videoEl punta al nodo clonato nel DOM
     PL('loadVideoUrl', `Imposto src sul nodo clonato: "${url.slice(0, 100)}…"`);
     videoEl.removeAttribute('src'); // pulisci attributo residuo se c'era
-    if (typeof url =='undefined' || url.length == 0 || url == location.href)
-          return PL('loadVideoUrl', `videoEl.src nullo, ritorno`);
     videoEl.src = url;
     if (startTime > 0) videoEl.currentTime = startTime;
     videoEl.load(); // forza il browser a riconoscere il nuovo src
 
-    PL('loadVideoUrl', `videoEl.src ${url} impostato ✓ — chiamo play()`);
+    PL('loadVideoUrl', `videoEl.src impostato ✓ — chiamo play()`);
     videoEl.play().then(() => {
       PL('loadVideoUrl', `play() riuscito ✓ — fade-in del player`);
       videoWrap.style.transition = 'opacity 0.3s';
@@ -417,81 +416,147 @@ const VideoPlayer = (() => {
   }
 
   function setupVideoEvents() {
-    if (!videoEl) { PL('setupVideoEvents','WARN: videoEl è null, skip'); return; }
-    PL('setupVideoEvents', `Registro event listeners su <video id="${videoEl.id}">`);
+    const FN = 'setupVideoEvents';
+    if (!videoEl) { PL(FN, 'WARN: videoEl è null — skip'); return; }
+    PL(FN, `Registro event listeners su <video id="${videoEl.id}">`);
 
-    // Rimuovi listener precedenti clonando il nodo (evita duplicati su re-open)
+    // ── 1. Abort del controller precedente ───────────────────────────────────
+    // Chiamare .abort() rimuove automaticamente TUTTI i listener registrati
+    // con { signal } su qualsiasi elemento — nessuna removeEventListener manuale.
+    if (videoAbortController) {
+      PL(FN, 'AbortController precedente presente → .abort() — rimozione automatica listener');
+      videoAbortController.abort();
+    }
+    videoAbortController = new AbortController();
+    const { signal } = videoAbortController;
+    PL(FN, `Nuovo AbortController creato — signal.aborted=${signal.aborted}`);
+
+    // ── 2. Clone del nodo video ───────────────────────────────────────────────
+    // cloneNode rimuove anche eventuali listener nativi rimasti (sicurezza extra).
     const oldVideo = videoEl;
-    const newVideo = oldVideo.cloneNode(true);
+    const newVideo = oldVideo.cloneNode(false); // false = no figli
     oldVideo.parentNode.replaceChild(newVideo, oldVideo);
     videoEl = newVideo;
-    PL('setupVideoEvents', `Video node clonato per evitare listener duplicati`);
+    PL(FN, 'Video node clonato e rimpiazzato nel DOM — videoEl ora punta al nuovo nodo');
 
-    videoEl.addEventListener('loadstart',      (e) => PL('videoEvent', `loadstart — browser ha iniziato a caricare: ${(e.target?.src||'').slice(0,80)}…`));
-    videoEl.addEventListener('loadedmetadata', (e) => PL('videoEvent', `loadedmetadata — durata: ${e.target?.duration?.toFixed(1)}s, dimensioni: ${e.target?.videoWidth}x${e.target?.videoHeight}`));
-    videoEl.addEventListener('canplay',        ()  => PL('videoEvent', `canplay — buffer sufficiente per iniziare`));
-    videoEl.addEventListener('waiting',        ()  => PL('videoEvent', `waiting — buffering in corso…`));
-    videoEl.addEventListener('stalled',        ()  => PL('videoEvent', `stalled — rete lenta o server non risponde`));
-    videoEl.addEventListener('timeupdate', updateProgress);
-    videoEl.addEventListener('progress',   updateBuffered);
+    // ── 3. Listener sul <video> — tutti con { signal } ────────────────────────
+    videoEl.addEventListener('loadstart', (e) =>
+      PL('videoEvent', `loadstart — src: ${(e.target?.src || '').slice(0, 80)}…`),
+      { signal });
+
+    videoEl.addEventListener('loadedmetadata', (e) =>
+      PL('videoEvent', `loadedmetadata — durata: ${e.target?.duration?.toFixed(1)}s  ${e.target?.videoWidth}x${e.target?.videoHeight}`),
+      { signal });
+
+    videoEl.addEventListener('canplay', () =>
+      PL('videoEvent', 'canplay — buffer sufficiente, pronto per play'),
+      { signal });
+
+    videoEl.addEventListener('canplaythrough', () =>
+      PL('videoEvent', 'canplaythrough — buffer completo, nessuna interruzione prevista'),
+      { signal });
+
+    videoEl.addEventListener('waiting', () =>
+      PL('videoEvent', 'waiting — buffering in corso…'),
+      { signal });
+
+    videoEl.addEventListener('stalled', () =>
+      PL('videoEvent', 'stalled — download interrotto (rete lenta o server non risponde)'),
+      { signal });
+
+    videoEl.addEventListener('suspend', () =>
+      PL('videoEvent', 'suspend — browser ha sospeso il download'),
+      { signal });
+
+    videoEl.addEventListener('timeupdate', updateProgress, { signal });
+    videoEl.addEventListener('progress',   updateBuffered,  { signal });
 
     videoEl.addEventListener('play', () => {
-      PL('videoEvent', `play — riproduzione avviata ✓`);
+      PL('videoEvent', 'play — riproduzione avviata ✓');
       document.getElementById('mv-play-icon').className = 'fas fa-pause';
       startHideControls();
-    });
+    }, { signal });
+
     videoEl.addEventListener('pause', () => {
-      PL('videoEvent', `pause — riproduzione in pausa`);
+      PL('videoEvent', 'pause — riproduzione in pausa');
       document.getElementById('mv-play-icon').className = 'fas fa-play';
       clearTimeout(hideControlsTimer);
       showControls();
-    });
+    }, { signal });
+
     videoEl.addEventListener('ended', () => {
-      PL('videoEvent', `ended — video terminato`);
+      PL('videoEvent', 'ended — video terminato');
       document.getElementById('mv-play-icon').className = 'fas fa-play';
       showControls();
-    });
+    }, { signal });
+
+    videoEl.addEventListener('volumechange', () => {
+      PL('videoEvent', `volumechange — volume=${videoEl?.volume?.toFixed(2)} muted=${videoEl?.muted}`);
+      updateVolumeIcon();
+    }, { signal });
+
+    videoEl.addEventListener('ratechange', () =>
+      PL('videoEvent', `ratechange — playbackRate=${videoEl?.playbackRate}`),
+      { signal });
+
+    videoEl.addEventListener('seeking', () =>
+      PL('videoEvent', `seeking — posizione: ${videoEl?.currentTime?.toFixed(1)}s`),
+      { signal });
+
+    videoEl.addEventListener('seeked', () =>
+      PL('videoEvent', `seeked — nuova posizione: ${videoEl?.currentTime?.toFixed(1)}s`),
+      { signal });
 
     videoEl.addEventListener('error', (e) => {
       const ve = e.target?.error;
-      const codes = { 1:'MEDIA_ERR_ABORTED', 2:'MEDIA_ERR_NETWORK', 3:'MEDIA_ERR_DECODE', 4:'MEDIA_ERR_SRC_NOT_SUPPORTED' };
+      const codes = {
+        1: 'MEDIA_ERR_ABORTED',
+        2: 'MEDIA_ERR_NETWORK',
+        3: 'MEDIA_ERR_DECODE',
+        4: 'MEDIA_ERR_SRC_NOT_SUPPORTED',
+      };
       const codeStr = ve ? (codes[ve.code] || `code=${ve.code}`) : 'unknown';
       const msg = ve?.message || '';
       console.error(`[player.js · videoEvent] ✗ ERRORE VIDEO — ${codeStr}: ${msg}`);
-      console.error(`[player.js · videoEvent]   src era: ${(e.target?.src||'').slice(0,120)}`);
-      console.error(`[player.js · videoEvent]   Causa più comune per MEDIA_ERR_NETWORK: CORS bloccato sul CDN`);
-      console.error(`[player.js · videoEvent]   Causa più comune per MEDIA_ERR_SRC_NOT_SUPPORTED: formato non supportato o URL non valido`);
-      showError(`Errore ${codeStr}${msg ? ': '+msg : ''} — prova a cambiare qualità o usa embed`);
-    });
+      console.error(`[player.js · videoEvent]   src: ${(e.target?.src || '').slice(0, 120)}`);
+      console.error('[player.js · videoEvent]   MEDIA_ERR_NETWORK          → CORS bloccato sul CDN o rete assente');
+      console.error('[player.js · videoEvent]   MEDIA_ERR_SRC_NOT_SUPPORTED → formato non supportato o URL non valido');
+      console.error('[player.js · videoEvent]   MEDIA_ERR_DECODE            → file corrotto o codec mancante');
+      showError(`Errore ${codeStr}${msg ? ': ' + msg : ''} — prova a cambiare qualità o usa embed`);
+    }, { signal });
 
-    videoEl.addEventListener('dblclick', toggleFullscreen);
+    videoEl.addEventListener('dblclick', toggleFullscreen, { signal });
 
+    // ── 4. Listener su document e overlay ─────────────────────────────────────
+    // Anche questi usano { signal } così vengono rimossi automaticamente al cleanup.
     document.addEventListener('fullscreenchange', () => {
       const icon = document.getElementById('mv-fs-icon');
       if (icon) icon.className = document.fullscreenElement ? 'fas fa-compress' : 'fas fa-expand';
-    });
+      PL('videoEvent', `fullscreenchange — fullscreen=${!!document.fullscreenElement}`);
+    }, { signal });
 
-    const overlay = document.getElementById('mv-controls-overlay');
-    if (overlay) {
-      overlay.addEventListener('mousemove', showAndScheduleHide);
-      overlay.addEventListener('touchstart', showAndScheduleHide, { passive: true });
-    }
-
-    document._mvKeyHandler = (e) => {
+    document.addEventListener('keydown', (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
       if (!document.getElementById('mv-player')) return;
       switch (e.key) {
-        case ' ': case 'k': e.preventDefault(); togglePlay(); break;
-        case 'ArrowRight': e.preventDefault(); skip(10); break;
-        case 'ArrowLeft': e.preventDefault(); skip(-10); break;
-        case 'ArrowUp': e.preventDefault(); setVolume(Math.min(1, (videoEl?.volume || 0) + 0.1)); break;
-        case 'ArrowDown': e.preventDefault(); setVolume(Math.max(0, (videoEl?.volume || 0) - 0.1)); break;
-        case 'm': case 'M': toggleMute(); break;
-        case 'f': case 'F': toggleFullscreen(); break;
+        case ' ': case 'k': e.preventDefault(); togglePlay();                                       break;
+        case 'ArrowRight':  e.preventDefault(); skip(10);                                           break;
+        case 'ArrowLeft':   e.preventDefault(); skip(-10);                                          break;
+        case 'ArrowUp':     e.preventDefault(); setVolume(Math.min(1, (videoEl?.volume || 0) + 0.1)); break;
+        case 'ArrowDown':   e.preventDefault(); setVolume(Math.max(0, (videoEl?.volume || 0) - 0.1)); break;
+        case 'm': case 'M': toggleMute();                                                           break;
+        case 'f': case 'F': toggleFullscreen();                                                     break;
       }
-    };
-    document.addEventListener('keydown', document._mvKeyHandler);
-    PL('setupVideoEvents', `Tutti i listener registrati ✓`);
+    }, { signal });
+
+    const overlay = document.getElementById('mv-controls-overlay');
+    if (overlay) {
+      overlay.addEventListener('mousemove',  showAndScheduleHide, { signal });
+      overlay.addEventListener('touchstart', showAndScheduleHide, { passive: true, signal });
+    }
+
+    PL(FN, `✓ Tutti i listener registrati con { signal } — signal.aborted=${signal.aborted}`);
+    PL(FN, 'NOTA: cleanup() chiama .abort() e rimuove tutto in un colpo — nessuna removeEventListener manuale necessaria');
   }
 
   function updateProgress() {
@@ -637,17 +702,39 @@ const VideoPlayer = (() => {
   }
 
   function cleanup() {
-    if (videoEl) {
-      videoEl.pause();
-      videoEl.src = '';
+    const FN = 'cleanup';
+    PL(FN, 'Avvio cleanup — abort signal + stop video + reset state');
+
+    // Un solo .abort() rimuove TUTTI i listener registrati con { signal }
+    // su videoEl, document, overlay — nessuna removeEventListener manuale.
+    if (videoAbortController) {
+      PL(FN, 'videoAbortController.abort() → rimozione automatica di tutti i listener');
+      videoAbortController.abort();
+      videoAbortController = null;
+    } else {
+      PL(FN, 'Nessun AbortController attivo');
     }
-    videoEl = null;
-    currentPost = null;
+
+    if (videoEl) {
+      PL(FN, 'Fermo il video e svuoto src');
+      videoEl.pause();
+      videoEl.removeAttribute('src');
+      videoEl.load(); // interrompe eventuali download in corso
+    }
+
+    videoEl        = null;
+    currentPost    = null;
     clearTimeout(hideControlsTimer);
+
+    // keydown era registrato con { signal } → già rimosso dall'abort sopra.
+    // Rimuovi il vecchio _mvKeyHandler residuo se presente da versioni precedenti.
     if (document._mvKeyHandler) {
       document.removeEventListener('keydown', document._mvKeyHandler);
       delete document._mvKeyHandler;
+      PL(FN, 'Rimosso _mvKeyHandler residuo da versione precedente');
     }
+
+    PL(FN, '✓ Cleanup completato');
   }
 
   return {
