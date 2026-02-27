@@ -419,11 +419,11 @@ const VideoPlayer = (() => {
     videoEl = newVideo;
     PL('setupVideoEvents', `Video node clonato per evitare listener duplicati`);
 
-    videoEl.addEventListener('loadstart',  () => PL('videoEvent', `loadstart — browser ha iniziato a caricare: ${videoEl.src.slice(0,80)}…`));
-    videoEl.addEventListener('loadedmetadata', () => PL('videoEvent', `loadedmetadata — durata: ${videoEl.duration?.toFixed(1)}s, dimensioni: ${videoEl.videoWidth}x${videoEl.videoHeight}`));
-    videoEl.addEventListener('canplay',    () => PL('videoEvent', `canplay — buffer sufficiente per iniziare`));
-    videoEl.addEventListener('waiting',    () => PL('videoEvent', `waiting — buffering in corso…`));
-    videoEl.addEventListener('stalled',    () => PL('videoEvent', `stalled — rete lenta o server non risponde`));
+    videoEl.addEventListener('loadstart',      (e) => PL('videoEvent', `loadstart — browser ha iniziato a caricare: ${(e.target?.src||'').slice(0,80)}…`));
+    videoEl.addEventListener('loadedmetadata', (e) => PL('videoEvent', `loadedmetadata — durata: ${e.target?.duration?.toFixed(1)}s, dimensioni: ${e.target?.videoWidth}x${e.target?.videoHeight}`));
+    videoEl.addEventListener('canplay',        ()  => PL('videoEvent', `canplay — buffer sufficiente per iniziare`));
+    videoEl.addEventListener('waiting',        ()  => PL('videoEvent', `waiting — buffering in corso…`));
+    videoEl.addEventListener('stalled',        ()  => PL('videoEvent', `stalled — rete lenta o server non risponde`));
     videoEl.addEventListener('timeupdate', updateProgress);
     videoEl.addEventListener('progress',   updateBuffered);
 
@@ -445,12 +445,12 @@ const VideoPlayer = (() => {
     });
 
     videoEl.addEventListener('error', (e) => {
-      const ve = videoEl.error;
+      const ve = e.target?.error;
       const codes = { 1:'MEDIA_ERR_ABORTED', 2:'MEDIA_ERR_NETWORK', 3:'MEDIA_ERR_DECODE', 4:'MEDIA_ERR_SRC_NOT_SUPPORTED' };
       const codeStr = ve ? (codes[ve.code] || `code=${ve.code}`) : 'unknown';
       const msg = ve?.message || '';
       console.error(`[player.js · videoEvent] ✗ ERRORE VIDEO — ${codeStr}: ${msg}`);
-      console.error(`[player.js · videoEvent]   src era: ${videoEl.src?.slice(0,120)}`);
+      console.error(`[player.js · videoEvent]   src era: ${(e.target?.src||'').slice(0,120)}`);
       console.error(`[player.js · videoEvent]   Causa più comune per MEDIA_ERR_NETWORK: CORS bloccato sul CDN`);
       console.error(`[player.js · videoEvent]   Causa più comune per MEDIA_ERR_SRC_NOT_SUPPORTED: formato non supportato o URL non valido`);
       showError(`Errore ${codeStr}${msg ? ': '+msg : ''} — prova a cambiare qualità o usa embed`);
