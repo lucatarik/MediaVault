@@ -376,8 +376,7 @@ import sys, types, micropip
 print('[Pyodide-Step4] Injecting mock ssl module into sys.modules...')
 _ssl_mock = types.ModuleType('ssl')
 
-# SSLContext deve essere una vera classe che accetta argomenti posizionali
-# (yt-dlp chiama ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT) che fallisce se SSLContext = object)
+# SSLContext: vera classe per supportare ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT) e tutti gli attributi
 class _FakeSSLContext:
     def __init__(self, protocol=None): pass
     def load_verify_locations(self, *a, **kw): pass
@@ -388,46 +387,174 @@ class _FakeSSLContext:
     def load_cert_chain(self, *a, **kw): pass
     def set_alpn_protocols(self, *a, **kw): pass
     def set_servername_callback(self, *a, **kw): pass
-    check_hostname = False
-    verify_mode = 0
-    options = 0
+    def set_npn_protocols(self, *a, **kw): pass
+    def get_ciphers(self, *a, **kw): return []
+    def session_stats(self, *a, **kw): return {}
+    def cert_store_stats(self, *a, **kw): return {}
+    check_hostname  = False
+    verify_mode     = 0
+    options         = 0
+    minimum_version = None
+    maximum_version = None
 
-_ssl_mock.SSLContext          = _FakeSSLContext
-_ssl_mock.SSLError            = OSError
-_ssl_mock.CertificateError    = ValueError
-_ssl_mock.CERT_NONE           = 0
-_ssl_mock.CERT_OPTIONAL       = 1
-_ssl_mock.CERT_REQUIRED       = 2
-_ssl_mock.PROTOCOL_TLS        = 2
-_ssl_mock.PROTOCOL_TLS_CLIENT = 16
-_ssl_mock.PROTOCOL_TLS_SERVER = 17
-_ssl_mock.PROTOCOL_SSLv23     = 2
-_ssl_mock.OP_NO_SSLv2         = 0x01000000
-_ssl_mock.OP_NO_SSLv3         = 0x02000000
-_ssl_mock.OP_NO_TLSv1         = 0x04000000
-_ssl_mock.OP_NO_TLSv1_1       = 0x10000000
-_ssl_mock.OP_NO_TLSv1_2       = 0x20000000
-_ssl_mock.OP_NO_COMPRESSION   = 0x20000
-_ssl_mock.HAS_SNI             = True
-_ssl_mock.HAS_ALPN            = True
-_ssl_mock.HAS_NPN             = False
-_ssl_mock.HAS_SSLv2           = False
-_ssl_mock.HAS_SSLv3           = False
-_ssl_mock.HAS_TLSv1_3         = True
-_ssl_mock.OPENSSL_VERSION          = 'OpenSSL 1.1.1 (fake)'
-_ssl_mock.OPENSSL_VERSION_INFO     = (1, 1, 1, 0, 15)
-_ssl_mock.OPENSSL_VERSION_NUMBER   = 0x1010100f
-_ssl_mock.SSL_ERROR_ZERO_RETURN    = 6
-_ssl_mock.SSL_ERROR_WANT_READ      = 2
-_ssl_mock.SSL_ERROR_WANT_WRITE     = 3
-_ssl_mock.SSL_ERROR_SYSCALL        = 5
-_ssl_mock.SSL_ERROR_SSL            = 1
-_ssl_mock.ALERT_DESCRIPTION_CLOSE_NOTIFY = 0
+# TLSVersion enum
+class _TLSVersion:
+    MINIMUM_SUPPORTED = -2
+    SSLv3             = 768
+    TLSv1             = 769
+    TLSv1_1           = 770
+    TLSv1_2           = 771
+    TLSv1_3           = 772
+    MAXIMUM_SUPPORTED = -1
+
+# Purpose enum
+class _Purpose:
+    class SERVER_AUTH:
+        _name_ = 'SERVER_AUTH'; oid = '1.3.6.1.5.5.7.3.1'
+    class CLIENT_AUTH:
+        _name_ = 'CLIENT_AUTH'; oid = '1.3.6.1.5.5.7.3.2'
+
+# ── Classi e tipi ─────────────────────────────────────────────────────────────
+_ssl_mock.SSLContext               = _FakeSSLContext
+_ssl_mock.SSLObject                = _FakeSSLContext
+_ssl_mock.SSLSocket                = _FakeSSLContext
+_ssl_mock.TLSVersion               = _TLSVersion
+_ssl_mock.Purpose                  = _Purpose
+
+# ── Eccezioni ─────────────────────────────────────────────────────────────────
+_ssl_mock.SSLError                 = OSError
+_ssl_mock.SSLEOFError              = OSError
+_ssl_mock.SSLSyscallError          = OSError
+_ssl_mock.SSLWantReadError         = OSError
+_ssl_mock.SSLWantWriteError        = OSError
+_ssl_mock.SSLZeroReturnError       = OSError
+_ssl_mock.SSLCertVerificationError = ValueError
+_ssl_mock.CertificateError         = ValueError
+
+# ── CERT_* ────────────────────────────────────────────────────────────────────
+_ssl_mock.CERT_NONE                = 0
+_ssl_mock.CERT_OPTIONAL            = 1
+_ssl_mock.CERT_REQUIRED            = 2
+
+# ── PROTOCOL_* ────────────────────────────────────────────────────────────────
+_ssl_mock.PROTOCOL_TLS             = 2
+_ssl_mock.PROTOCOL_TLS_CLIENT      = 16
+_ssl_mock.PROTOCOL_TLS_SERVER      = 17
+_ssl_mock.PROTOCOL_SSLv23          = 2
+_ssl_mock.PROTOCOL_TLSv1           = 3
+_ssl_mock.PROTOCOL_TLSv1_1         = 4
+_ssl_mock.PROTOCOL_TLSv1_2         = 5
+
+# ── OP_* ──────────────────────────────────────────────────────────────────────
+_ssl_mock.OP_ALL                       = 0x80000054
+_ssl_mock.OP_NO_SSLv2                  = 0x01000000
+_ssl_mock.OP_NO_SSLv3                  = 0x02000000
+_ssl_mock.OP_NO_TLSv1                  = 0x04000000
+_ssl_mock.OP_NO_TLSv1_1                = 0x10000000
+_ssl_mock.OP_NO_TLSv1_2                = 0x08000000
+_ssl_mock.OP_NO_TLSv1_3                = 0x20000000
+_ssl_mock.OP_NO_COMPRESSION            = 0x00020000
+_ssl_mock.OP_NO_TICKET                 = 0x00004000
+_ssl_mock.OP_NO_RENEGOTIATION          = 0x40000000
+_ssl_mock.OP_CIPHER_SERVER_PREFERENCE  = 0x00400000
+_ssl_mock.OP_SINGLE_DH_USE             = 0x00100000
+_ssl_mock.OP_SINGLE_ECDH_USE           = 0x00080000
+_ssl_mock.OP_LEGACY_SERVER_CONNECT     = 0x00000004
+_ssl_mock.OP_ENABLE_KTLS               = 0x00000008
+_ssl_mock.OP_IGNORE_UNEXPECTED_EOF     = 0x00000080
+_ssl_mock.OP_ENABLE_MIDDLEBOX_COMPAT   = 0x00100000
+
+# ── HAS_* ─────────────────────────────────────────────────────────────────────
+_ssl_mock.HAS_SNI                  = True
+_ssl_mock.HAS_ALPN                 = True
+_ssl_mock.HAS_NPN                  = False
+_ssl_mock.HAS_ECDH                 = True
+_ssl_mock.HAS_SSLv2                = False
+_ssl_mock.HAS_SSLv3                = False
+_ssl_mock.HAS_TLSv1                = True
+_ssl_mock.HAS_TLSv1_1              = True
+_ssl_mock.HAS_TLSv1_2              = True
+_ssl_mock.HAS_TLSv1_3              = True
+_ssl_mock.HAS_NEVER_CHECK_COMMON_NAME = True
+
+# ── SSL_ERROR_* ───────────────────────────────────────────────────────────────
+_ssl_mock.SSL_ERROR_ZERO_RETURN        = 6
+_ssl_mock.SSL_ERROR_WANT_READ          = 2
+_ssl_mock.SSL_ERROR_WANT_WRITE         = 3
+_ssl_mock.SSL_ERROR_WANT_CONNECT       = 7
+_ssl_mock.SSL_ERROR_WANT_X509_LOOKUP   = 4
+_ssl_mock.SSL_ERROR_SYSCALL            = 5
+_ssl_mock.SSL_ERROR_SSL                = 1
+_ssl_mock.SSL_ERROR_EOF                = 8
+_ssl_mock.SSL_ERROR_INVALID_ERROR_CODE = 10
+
+# ── ALERT_DESCRIPTION_* ───────────────────────────────────────────────────────
+_ssl_mock.ALERT_DESCRIPTION_CLOSE_NOTIFY              = 0
+_ssl_mock.ALERT_DESCRIPTION_UNEXPECTED_MESSAGE        = 10
+_ssl_mock.ALERT_DESCRIPTION_BAD_RECORD_MAC            = 20
+_ssl_mock.ALERT_DESCRIPTION_RECORD_OVERFLOW           = 22
+_ssl_mock.ALERT_DESCRIPTION_DECOMPRESSION_FAILURE     = 30
+_ssl_mock.ALERT_DESCRIPTION_HANDSHAKE_FAILURE         = 40
+_ssl_mock.ALERT_DESCRIPTION_BAD_CERTIFICATE           = 42
+_ssl_mock.ALERT_DESCRIPTION_UNSUPPORTED_CERTIFICATE   = 43
+_ssl_mock.ALERT_DESCRIPTION_CERTIFICATE_REVOKED       = 44
+_ssl_mock.ALERT_DESCRIPTION_CERTIFICATE_EXPIRED       = 45
+_ssl_mock.ALERT_DESCRIPTION_CERTIFICATE_UNKNOWN       = 46
+_ssl_mock.ALERT_DESCRIPTION_ILLEGAL_PARAMETER         = 47
+_ssl_mock.ALERT_DESCRIPTION_UNKNOWN_CA                = 48
+_ssl_mock.ALERT_DESCRIPTION_ACCESS_DENIED             = 49
+_ssl_mock.ALERT_DESCRIPTION_DECODE_ERROR              = 50
+_ssl_mock.ALERT_DESCRIPTION_DECRYPT_ERROR             = 51
+_ssl_mock.ALERT_DESCRIPTION_PROTOCOL_VERSION          = 70
+_ssl_mock.ALERT_DESCRIPTION_INSUFFICIENT_SECURITY     = 71
+_ssl_mock.ALERT_DESCRIPTION_INTERNAL_ERROR            = 80
+_ssl_mock.ALERT_DESCRIPTION_USER_CANCELLED            = 90
+_ssl_mock.ALERT_DESCRIPTION_NO_RENEGOTIATION          = 100
+_ssl_mock.ALERT_DESCRIPTION_UNSUPPORTED_EXTENSION     = 110
+_ssl_mock.ALERT_DESCRIPTION_CERTIFICATE_UNOBTAINABLE  = 111
+_ssl_mock.ALERT_DESCRIPTION_UNRECOGNIZED_NAME         = 112
+_ssl_mock.ALERT_DESCRIPTION_BAD_CERTIFICATE_STATUS_RESPONSE = 113
+_ssl_mock.ALERT_DESCRIPTION_BAD_CERTIFICATE_HASH_VALUE= 114
+_ssl_mock.ALERT_DESCRIPTION_UNKNOWN_PSK_IDENTITY      = 115
+
+# ── VERIFY_* ──────────────────────────────────────────────────────────────────
+_ssl_mock.VERIFY_DEFAULT            = 0
+_ssl_mock.VERIFY_CRL_CHECK_LEAF     = 4
+_ssl_mock.VERIFY_CRL_CHECK_CHAIN    = 12
+_ssl_mock.VERIFY_X509_STRICT        = 32
+_ssl_mock.VERIFY_ALLOW_PROXY_CERTS  = 64
+_ssl_mock.VERIFY_X509_TRUSTED_FIRST = 32768
+_ssl_mock.VERIFY_X509_PARTIAL_CHAIN = 524288
+
+# ── OpenSSL versione ──────────────────────────────────────────────────────────
+_ssl_mock.OPENSSL_VERSION        = 'OpenSSL 1.1.1 (fake)'
+_ssl_mock.OPENSSL_VERSION_INFO   = (1, 1, 1, 0, 15)
+_ssl_mock.OPENSSL_VERSION_NUMBER = 0x1010100f
+_ssl_mock._OPENSSL_API_VERSION   = (1, 1, 1)
+
+# ── PEM/DER helpers ───────────────────────────────────────────────────────────
+_ssl_mock.PEM_HEADER            = '-----BEGIN CERTIFICATE-----'
+_ssl_mock.PEM_FOOTER            = '-----END CERTIFICATE-----'
+_ssl_mock.DER_cert_to_PEM_cert  = lambda der: ''
+_ssl_mock.PEM_cert_to_DER_cert  = lambda pem: b''
+_ssl_mock.CHANNEL_BINDING_TYPES = []
+
+# ── Funzioni di utilità ───────────────────────────────────────────────────────
 _ssl_mock.create_default_context   = lambda *a, **kw: _FakeSSLContext()
 _ssl_mock.wrap_socket              = lambda sock, *a, **kw: sock
 _ssl_mock.match_hostname           = lambda cert, hostname: None
-_ssl_mock.DER_cert_to_PEM_cert     = lambda der: ''
-_ssl_mock.get_default_verify_paths = lambda: type('Paths', (), {'cafile': None, 'capath': None, 'openssl_cafile_env': '', 'openssl_capath_env': '', 'openssl_cafile': '', 'openssl_capath': ''})()
+_ssl_mock.get_server_certificate   = lambda *a, **kw: ''
+_ssl_mock.get_protocol_name        = lambda protocol_code: ''
+_ssl_mock.cert_time_to_seconds     = lambda timestring: 0
+_ssl_mock.RAND_status              = lambda: 1
+_ssl_mock.RAND_bytes               = lambda n: b'\x00' * n
+_ssl_mock.RAND_add                 = lambda s, entropy: None
+_ssl_mock.get_default_verify_paths = lambda: type('Paths', (), {
+    'cafile': None, 'capath': None,
+    'openssl_cafile_env': '', 'openssl_capath_env': '',
+    'openssl_cafile': '', 'openssl_capath': '',
+})()
+
 sys.modules['ssl']  = _ssl_mock
 sys.modules['_ssl'] = _ssl_mock
 print('[Pyodide-Step4] ssl mock OK')
