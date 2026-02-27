@@ -381,12 +381,16 @@ _ssl_mock = types.ModuleType('ssl')
 class _FakeSSLContext:
     def __init__(self, protocol=None): pass
     def load_verify_locations(self, *a, **kw): pass
+    def load_default_certs(self, *a, **kw): pass
+    def set_default_verify_paths(self, *a, **kw): pass
     def set_ciphers(self, *a, **kw): pass
     def wrap_socket(self, sock, *a, **kw): return sock
     def load_cert_chain(self, *a, **kw): pass
     def set_alpn_protocols(self, *a, **kw): pass
+    def set_servername_callback(self, *a, **kw): pass
     check_hostname = False
     verify_mode = 0
+    options = 0
 
 _ssl_mock.SSLContext          = _FakeSSLContext
 _ssl_mock.SSLError            = OSError
