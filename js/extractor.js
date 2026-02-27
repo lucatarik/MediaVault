@@ -547,7 +547,7 @@ _ssl_mock.get_server_certificate   = lambda *a, **kw: ''
 _ssl_mock.get_protocol_name        = lambda protocol_code: ''
 _ssl_mock.cert_time_to_seconds     = lambda timestring: 0
 _ssl_mock.RAND_status              = lambda: 1
-_ssl_mock.RAND_bytes               = lambda n: b'\x00' * n
+_ssl_mock.RAND_bytes               = lambda n: bytes(n)
 _ssl_mock.RAND_add                 = lambda s, entropy: None
 _ssl_mock.get_default_verify_paths = lambda: type('Paths', (), {
     'cafile': None, 'capath': None,
