@@ -2,6 +2,12 @@
  * MediaVault App — Main Application Logic
  */
 
+// ─── Logger shorthand ────────────────────────────────────────────────────────────
+const FILE = 'app.js';
+const AL  = (fn, msg, d) => MV.log(FILE, fn, msg, d !== undefined ? d : undefined);
+const AW  = (fn, msg, d) => MV.warn(FILE, fn, msg, d !== undefined ? d : undefined);
+const AE  = (fn, msg, d) => MV.error(FILE, fn, msg, d !== undefined ? d : undefined);
+
 // ─── State ────────────────────────────────────────────────────────────────────
 const State = {
   posts: [],
@@ -59,31 +65,46 @@ function platformDotStyle(color) {
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 async function init() {
+  MV.section('[app.js] BOOT MediaVault');
+  AL('init', 'Avvio applicazione MediaVault');
+  AL('init', `User-Agent: ${navigator.userAgent.slice(0,80)}`);
+
   // Register SW
   if ('serviceWorker' in navigator) {
+    AL('init', 'Registro Service Worker (sw.js)…');
     try {
       await navigator.serviceWorker.register('./sw.js');
-    } catch (e) { console.warn('SW registration failed:', e); }
+      AL('init', '✓ Service Worker registrato');
+    } catch (e) { AW('init', `SW registration failed: ${e.message}`); }
+  } else {
+    AW('init', 'Service Worker non supportato da questo browser');
   }
 
   // Load data
+  AL('init', 'Carico dati da StorageManager.init()…');
   State.posts = await StorageManager.init();
-  
+  AL('init', `✓ Caricati ${State.posts.length} post`);
+
   // Render everything
+  AL('init', 'Rendering UI…');
   renderSidebar();
   renderNavBadges();
   renderPage();
 
   // Wire up events
   setupEvents();
+  AL('init', '✓ Event listeners registrati');
 
   // Check for ?action=add (PWA shortcut)
   if (new URLSearchParams(location.search).get('action') === 'add') {
+    AL('init', '?action=add rilevato → openAddModal()');
     openAddModal();
   }
 
   // Update stats badge
   renderStats();
+  AL('init', `✓ Init completata — ${State.posts.length} post totali`);
+  MV.groupEnd();
 }
 
 // ─── Render ───────────────────────────────────────────────────────────────────
@@ -430,11 +451,22 @@ function removeTag(tag) {
 }
 
 async function analyzeUrl() {
+  const FN = 'analyzeUrl';
   const url = document.getElementById('url-input').value.trim();
-  if (!url) { showToast('Inserisci un URL valido', 'error'); return; }
+  AL(FN, `=== ANALISI URL AVVIATA ===`);
+  AL(FN, `Input utente: "${url}"`);
+
+  if (!url) {
+    AW(FN, 'URL vuoto → showToast errore');
+    showToast('Inserisci un URL valido', 'error');
+    return;
+  }
 
   let cleanUrl = url;
-  if (!url.startsWith('http')) cleanUrl = 'https://' + url;
+  if (!url.startsWith('http')) {
+    cleanUrl = 'https://' + url;
+    AL(FN, `URL normalizzato (aggiunto https://): "${cleanUrl}"`);
+  }
 
   const btn = document.getElementById('analyze-btn');
   btn.disabled = true;
@@ -442,11 +474,15 @@ async function analyzeUrl() {
 
   const progress = document.getElementById('analyze-progress');
   progress.innerHTML = '<span class="spinner"></span> Rilevamento piattaforma...';
+  AL(FN, `Chiamo MediaDetector.analyze("${cleanUrl}")…`);
 
   try {
     analyzedData = await MediaDetector.analyze(cleanUrl, msg => {
+      AL(FN, `MediaDetector progress: "${msg}"`);
       progress.innerHTML = `<span class="spinner"></span> ${msg}`;
     });
+
+    AL(FN, `✓ MediaDetector.analyze completato:`, { platform: analyzedData.platform, mediaType: analyzedData.mediaType, title: analyzedData.title?.slice(0,50), hasThumb: !!analyzedData.thumbnail, embedUrl: analyzedData.embedUrl?.slice(0,60) });
 
     progress.textContent = '✓ Completato!';
     setTimeout(() => { progress.textContent = ''; }, 2000);
@@ -454,17 +490,22 @@ async function analyzeUrl() {
     // Fill fields
     if (!document.getElementById('post-title').value) {
       document.getElementById('post-title').value = analyzedData.title || '';
+      AL(FN, `Titolo auto-compilato: "${analyzedData.title?.slice(0,50)}"`);
     }
     if (!document.getElementById('post-desc').value) {
       document.getElementById('post-desc').value = analyzedData.description || '';
+      AL(FN, `Descrizione auto-compilata: "${analyzedData.description?.slice(0,50)}"`);
     }
 
     // Auto-categorize
+    AL(FN, `Chiamo Categorizer.categorize(analyzedData)…`);
     const autoCats = Categorizer.categorize(analyzedData);
+    AL(FN, `✓ Categorie auto-rilevate: [${autoCats.join(', ')}]`);
     renderCategorySelector(autoCats);
 
     // Auto-tags from hashtags
     if (analyzedData.hashtags && analyzedData.hashtags.length > 0) {
+      AL(FN, `Hashtag rilevati (${analyzedData.hashtags.length}): [${analyzedData.hashtags.join(', ')}]`);
       currentTags = [...new Set([...currentTags, ...analyzedData.hashtags])].slice(0, 15);
       renderTagsInput();
     }
@@ -472,12 +513,13 @@ async function analyzeUrl() {
     showUrlPreview(analyzedData);
 
   } catch (e) {
+    AE(FN, `MediaDetector.analyze eccezione: ${e.message}`, e);
     progress.textContent = '⚠ Analisi parziale, puoi completare manualmente.';
-    console.error(e);
   }
 
   btn.disabled = false;
   btn.innerHTML = '<i class="fas fa-search"></i> Analizza';
+  AL(FN, `=== ANALISI URL COMPLETATA ===`);
 }
 
 function showUrlPreview(data) {
@@ -540,12 +582,13 @@ async function savePost() {
   saveBtn.disabled = true;
   saveBtn.innerHTML = '<span class="spinner"></span> Salvataggio...';
 
+  AL('savePost', `Chiamo StorageManager.save(post) — id="${post.id}" platform="${post.platform}"`);
   await StorageManager.save(post);
 
   // Update state
   const idx = State.posts.findIndex(p => p.id === post.id);
-  if (idx >= 0) State.posts[idx] = post;
-  else State.posts.unshift(post);
+  if (idx >= 0) { State.posts[idx] = post; AL('savePost', `Post aggiornato in State (idx=${idx})`); }
+  else { State.posts.unshift(post); AL('savePost', `Nuovo post aggiunto in State (totale: ${State.posts.length})`); }
 
   closeAddModal();
   renderSidebar();
@@ -556,6 +599,7 @@ async function savePost() {
   saveBtn.disabled = false;
   saveBtn.innerHTML = '<i class="fas fa-save"></i> Salva';
   showToast(State.editPost ? 'Modificato!' : 'Aggiunto!', 'success');
+  AL('savePost', `✓ Salvataggio completato — "${post.title?.slice(0,40)}"`);
 }
 
 function editPost(id) {
@@ -627,8 +671,13 @@ function openViewer(id) {
 
   // Video/social: try Cobalt direct player first
   if (isVideoType) {
+    AL('openViewer', `mediaType="${post.mediaType}" → apro VideoPlayer.open()`);
+    AL('openViewer', `LOGICA: Extractor.extract() proverà fast-path → Cobalt → yt-dlp WASM`);
     // Register fallback callback used by player.js
-    window._viewerFallbackEmbed = (p) => _renderEmbedFallback(p, document.getElementById('viewer-content'));
+    window._viewerFallbackEmbed = (p) => {
+      AL('openViewer', `_viewerFallbackEmbed chiamato per post id="${p.id}" → renderEmbedFallback`);
+      _renderEmbedFallback(p, document.getElementById('viewer-content'));
+    };
     VideoPlayer.open(post, content);
     viewer.classList.add('open');
     return;
@@ -694,20 +743,60 @@ function closeViewer() {
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 function renderSettingsPage() {
+  const FN = 'renderSettingsPage';
+  AL(FN, 'Rendering pagina impostazioni…');
   const s = StorageManager.getSettings();
+  AL(FN, `Settings correnti:`, { redisUrl: s.redisUrl ? '(configurato)' : '(vuoto)', redisToken: s.redisToken ? '(configurato)' : '(vuoto)', useAlloriginsFallback: s.useAlloriginsFallback });
+
   document.getElementById('redis-url').value = s.redisUrl || '';
   document.getElementById('redis-token').value = s.redisToken || '';
+
+  // Aggiorna toggle allorigins
+  const toggle = document.getElementById('toggle-allorigins');
+  if (toggle) {
+    toggle.checked = s.useAlloriginsFallback === true;
+    AL(FN, `Toggle allorigins: ${toggle.checked}`);
+  }
+  updateProxyStatusMsg(s.useAlloriginsFallback === true);
   updateRedisStatus();
   renderStats();
+  AL(FN, '✓ Settings page renderizzata');
+}
+
+function toggleAlloriginsFallback(enabled) {
+  const FN = 'toggleAlloriginsFallback';
+  AL(FN, `useAlloriginsFallback → ${enabled}`);
+  AL(FN, enabled
+    ? 'LOGICA: allorigins e codetabs aggiunti come fallback dopo CF Worker'
+    : 'LOGICA: solo CF Worker usato come proxy (default sicuro)');
+  const settings = StorageManager.getSettings();
+  settings.useAlloriginsFallback = enabled;
+  StorageManager.saveSettings(settings);
+  updateProxyStatusMsg(enabled);
+  showToast(enabled ? 'Allorigins fallback attivato' : 'Solo CF Worker (allorigins disattivato)', 'success', 2500);
+  AL(FN, `✓ Impostazione salvata`);
+}
+
+function updateProxyStatusMsg(useAllorigins) {
+  const el = document.getElementById('proxy-active-name');
+  if (!el) return;
+  el.textContent = useAllorigins
+    ? 'CF Worker + allorigins (fallback)'
+    : 'CF Worker only (mediavault.lucatarik.workers.dev)';
+  el.style.color = useAllorigins ? 'var(--accent2)' : 'var(--accent)';
 }
 
 function saveSettings() {
+  const FN = 'saveSettings';
+  AL(FN, 'Salvo impostazioni Redis…');
   const settings = StorageManager.getSettings();
-  settings.redisUrl = document.getElementById('redis-url').value.trim();
+  settings.redisUrl   = document.getElementById('redis-url').value.trim();
   settings.redisToken = document.getElementById('redis-token').value.trim();
+  AL(FN, `redisUrl: "${settings.redisUrl ? settings.redisUrl.slice(0,40)+'…' : '(vuoto)'}"`);
   StorageManager.saveSettings(settings);
   showToast('Impostazioni salvate', 'success');
   updateRedisStatus();
+  AL(FN, '✓ Settings Redis salvate');
 }
 
 function updateRedisStatus() {

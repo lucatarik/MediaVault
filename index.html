@@ -164,6 +164,29 @@
           </div>
         </div>
 
+        <!-- Proxy settings -->
+        <div class="settings-section">
+          <h3><i class="fas fa-shield-alt"></i> Proxy &amp; Rete</h3>
+          <p style="font-size:0.8rem;color:var(--text-400);margin-bottom:16px;line-height:1.6">
+            MediaVault usa il <strong style="color:var(--accent)">Cloudflare Worker</strong> personale
+            (<code style="font-size:0.75rem;background:rgba(255,255,255,0.07);padding:2px 5px;border-radius:4px">mediavault.lucatarik.workers.dev</code>)
+            come unico proxy CORS. <strong>corsproxy.io non viene mai usato.</strong>
+          </p>
+          <div class="settings-row" style="align-items:center">
+            <div>
+              <div class="settings-row-label">Usa allorigins come fallback</div>
+              <div class="settings-row-desc">Se il CF Worker non risponde, prova anche api.allorigins.win come backup. Disattivato di default.</div>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="toggle-allorigins" onchange="toggleAlloriginsFallback(this.checked)">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div id="proxy-status-msg" style="font-size:0.75rem;color:var(--text-400);margin-top:8px;padding:8px 12px;background:rgba(255,255,255,0.04);border-radius:8px">
+            Proxy attivo: <strong id="proxy-active-name" style="color:var(--accent)">CF Worker only</strong>
+          </div>
+        </div>
+
         <!-- Redis settings -->
         <div class="settings-section">
           <h3><i class="fas fa-database"></i> Upstash Redis</h3>
@@ -236,9 +259,10 @@
             <div>
               <div class="settings-row-label">Servizi esterni utilizzati</div>
               <div class="settings-row-desc">
-                Microlink.io (metadati) · AllOrigins (proxy) · 
-                YouTube/Instagram/Vimeo/TikTok (embed nativi) · 
-                Upstash Redis (cloud storage opzionale)
+                CF Worker <code style="font-size:0.7rem;background:rgba(255,255,255,0.06);padding:1px 4px;border-radius:3px">mediavault.lucatarik.workers.dev</code> (proxy CORS) ·
+                Microlink.io (metadati) · Invidious (YouTube) · vxinstagram (Instagram) ·
+                Cobalt (TikTok/Twitter/Facebook) · Pyodide + yt-dlp (fallback universale WASM) ·
+                Upstash Redis (cloud storage opzionale) · AllOrigins (solo se attivato come fallback)
               </div>
             </div>
           </div>
@@ -386,6 +410,7 @@
 <div class="toast-container" id="toast-container"></div>
 
 <!-- Scripts -->
+<script src="js/logger.js"></script>
 <script src="js/storage.js"></script>
 <script src="js/detector.js"></script>
 <script src="js/categorizer.js"></script>
