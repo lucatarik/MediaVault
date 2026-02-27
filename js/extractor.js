@@ -567,85 +567,103 @@ print(f'[Pyodide-Step4] yt-dlp {yt_dlp.version.__version__} installato OK')
 `);
     L(FN,'Step 4 ✓ ssl mockato + yt-dlp installato');
 
-    // Step 5: patch urllib con XHR sincrono via CF Worker
-    // PERCHÉ XHR e non _orig(urllib): Pyodide gira in WASM e non può aprire socket TCP
-    // direttamente. L'unico modo per fare HTTP in un Web Worker Pyodide è usare
-    // js.XMLHttpRequest (sincrono — legale nei Web Worker) che usa la fetch API del browser.
-    L(FN,'Step 5: patch urllib.urlopen con XHR sincrono via CF Worker…');
-    L(FN,'LOGICA: js.XMLHttpRequest sincrono (solo nei Web Worker) → CF Worker relay → YouTube/etc');
+    // Step 5: patch http.client.HTTPConnection/HTTPSConnection con XHR sincrono
+    // PROBLEMA: yt-dlp usa il proprio opener che chiama http.client.HTTPConnection
+    // direttamente, bypassando urllib.urlopen. HTTPConnection usa socket.create_connection()
+    // che in Pyodide WASM tenta WebSocket → bloccato come Mixed Content.
+    // SOLUZIONE: rimpiazzare HTTPConnection e HTTPSConnection con classi che usano
+    // js.XMLHttpRequest sincrono (legale nei Web Worker) via CF Worker.
+    L(FN,'Step 5: patch http.client.HTTPConnection con XHR sincrono via CF Worker…');
+    L(FN,'LOGICA: http.client livello basso → XHR sincrono → CF Worker → YouTube');
     _pyodide.globals.set('_CF_BASE_PY', CF_BASE + '/?url=');
     _pyodide.globals.set('_CF_KEY_PY',  '&key=' + CF_KEY);
 
     await _pyodide.runPythonAsync(`
-import js, io, email.message
-import urllib.request as _ur
-import urllib.parse  as _up
-from urllib.error    import URLError, HTTPError
-from urllib.response import addinfourl
+import js, io, email.message, http.client as _hc
+import urllib.parse as _up
+from urllib.error import URLError, HTTPError
 
-def _patched(url_or_req, data=None, timeout=30, **kw):
-    # ── estrai URL e metadati dalla richiesta ──────────────────────────────
-    if isinstance(url_or_req, str):
-        raw     = url_or_req
-        method  = 'POST' if data else 'GET'
-        req_hdr = {}
-        req_data = data
+def _xhr_fetch(scheme, host, port, method, path, headers, body):
+    port_default = 443 if scheme == 'https' else 80
+    show_port = f':{port}' if port and port != port_default else ''
+    full_url = f'{scheme}://{host}{show_port}{path}'
+    enc = _up.quote(full_url, safe='')
+    proxy_url = _CF_BASE_PY + enc + _CF_KEY_PY
+    print(f'[http-patch] XHR {method} {scheme}://{host}{show_port}{path[:60]}')
+    xhr = js.XMLHttpRequest.new()
+    xhr.open(method, proxy_url, False)
+    xhr.responseType = 'arraybuffer'
+    for k, v in (headers or {}).items():
+        try: xhr.setRequestHeader(str(k), str(v))
+        except: pass
+    if body:
+        xhr.send(body if isinstance(body, (bytes, bytearray)) else str(body))
     else:
-        raw      = getattr(url_or_req, 'full_url', str(url_or_req))
-        method   = url_or_req.get_method() if hasattr(url_or_req, 'get_method') else ('POST' if getattr(url_or_req, 'data', None) else 'GET')
-        req_hdr  = dict(getattr(url_or_req, 'headers', {}))
-        req_data = getattr(url_or_req, 'data', None)
+        xhr.send()
+    return xhr
 
-    # ── costruisci URL proxy CF Worker ─────────────────────────────────────
-    enc      = _up.quote(raw, safe='')
-    pu       = _CF_BASE_PY + enc + _CF_KEY_PY
-    print(f'[urllib-patch] XHR {method} → {pu[:100]}')
-
-    try:
-        xhr = js.XMLHttpRequest.new()
-        xhr.open(method, pu, False)          # False = SINCRONO (ok nei Web Worker)
-        xhr.responseType = 'arraybuffer'
-        # propaga gli header originali (User-Agent, Accept, ecc.)
-        for k, v in req_hdr.items():
-            try: xhr.setRequestHeader(str(k), str(v))
-            except: pass
-        # invia; req_data può essere None, str o bytes
-        if req_data is not None:
-            if isinstance(req_data, (bytes, bytearray)):
-                xhr.send(req_data)
-            else:
-                xhr.send(str(req_data))
-        else:
-            xhr.send()
-
-        status = xhr.status
-        print(f'[urllib-patch] HTTP {status} ← {raw[:60]}')
-
-        if status >= 400:
-            raise HTTPError(raw, status, xhr.statusText or '', {}, None)
-
-        # converte ArrayBuffer → bytes Python
-        buf     = xhr.response
-        content = bytes(js.Uint8Array.new(buf).to_py())
-
-        # costruisci oggetto headers compatibile urllib
-        msg = email.message.Message()
-        hdrs_str = xhr.getAllResponseHeaders() or ''
-        for line in hdrs_str.strip().splitlines():
+class _XHRResponse:
+    def __init__(self, xhr, url):
+        self.status = xhr.status
+        self.reason = xhr.statusText or ''
+        self.version = 11
+        self.will_close = True
+        self._url    = url
+        self._data   = io.BytesIO(bytes(js.Uint8Array.new(xhr.response).to_py()))
+        self.msg = email.message.Message()
+        for line in (xhr.getAllResponseHeaders() or '').strip().splitlines():
             if ':' in line:
-                k2, v2 = line.split(':', 1)
-                msg[k2.strip()] = v2.strip()
+                k, v = line.split(':', 1)
+                self.msg[k.strip()] = v.strip()
+    def read(self, amt=None):   return self._data.read(amt)
+    def readline(self):         return self._data.readline()
+    def readinto(self, buf):
+        chunk = self._data.read(len(buf)); buf[:len(chunk)] = chunk; return len(chunk)
+    def getheader(self, name, default=None): return self.msg.get(name, default)
+    def getheaders(self):       return list(self.msg.items())
+    def isclosed(self):         return False
+    def fileno(self):           return -1
+    def flush(self):            pass
+    def close(self):            pass
+    def readable(self):         return True
 
-        return addinfourl(io.BytesIO(content), msg, raw, status)
+class _XHRConnection:
+    _scheme = 'http'
+    def __init__(self, host, port=None, timeout=30, **kw):
+        self.host    = host
+        self.port    = port
+        self.timeout = timeout
+        self._method  = 'GET'
+        self._path    = '/'
+        self._headers = {}
+        self._body    = None
+    def request(self, method, url, body=None, headers={}):
+        self._method  = method
+        self._path    = url
+        self._headers = dict(headers)
+        self._body    = body
+    def getresponse(self):
+        xhr = _xhr_fetch(self._scheme, self.host, self.port,
+                         self._method, self._path, self._headers, self._body)
+        return _XHRResponse(xhr, self._path)
+    def set_debuglevel(self, *a): pass
+    def connect(self):            pass
+    def close(self):              pass
+    def set_tunnel(self, *a, **kw): pass
+    def putrequest(self, method, url, **kw):
+        self._method = method; self._path = url
+    def putheader(self, key, val): self._headers[key] = val
+    def endheaders(self, body=None): self._body = body
+    def send(self, data):          self._body = data
 
-    except (HTTPError, URLError):
-        raise
-    except Exception as e:
-        print(f'[urllib-patch] XHR errore: {e}')
-        raise URLError(f'XHR via CF Worker fallito: {e}') from e
+class _XHRSConnection(_XHRConnection):
+    _scheme = 'https'
+    def __init__(self, host, port=None, context=None, **kw):
+        super().__init__(host, port, **kw)
 
-_ur.urlopen = _patched
-print('[urllib-patch] OK — urllib.urlopen sostituito con XHR sincrono via CF Worker')
+_hc.HTTPConnection  = _XHRConnection
+_hc.HTTPSConnection = _XHRSConnection
+print('[http-patch] OK — http.client.HTTPConnection/HTTPSConnection sostituiti con XHR via CF Worker')
 `);
 
     _ytdlpReady = true;   // <-- JS, non Python!
