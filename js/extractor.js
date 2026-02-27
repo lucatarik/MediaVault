@@ -637,7 +637,7 @@ class _XHRConnection:
         self._path    = '/'
         self._headers = {}
         self._body    = None
-    def request(self, method, url, body=None, headers={}):
+    def request(self, method, url, body=None, headers={}, *, encode_chunked=False):
         self._method  = method
         self._path    = url
         self._headers = dict(headers)
