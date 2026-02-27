@@ -405,7 +405,7 @@ const VideoPlayer = (() => {
     if (startTime > 0) videoEl.currentTime = startTime;
     videoEl.load(); // forza il browser a riconoscere il nuovo src
 
-    PL('loadVideoUrl', `videoEl.src impostato ✓ — chiamo play()`);
+    PL('loadVideoUrl', `videoEl.src ${url} impostato ✓ — chiamo play()`);
     videoEl.play().then(() => {
       PL('loadVideoUrl', `play() riuscito ✓ — fade-in del player`);
       videoWrap.style.transition = 'opacity 0.3s';
