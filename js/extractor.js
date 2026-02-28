@@ -579,60 +579,342 @@ print(f'[Pyodide-Step4] yt-dlp {yt_dlp.version.__version__} installato OK')
     _pyodide.globals.set('_CF_KEY_PY',  '&key=' + CF_KEY);
 
     await _pyodide.runPythonAsync(`
-import js, io, email.message, http.client as _hc
+import js, io, email.message, http.client as _hc, sys, gzip as _gzip, zlib as _zlib
 import urllib.parse as _up
-from urllib.error import URLError, HTTPError
+import base64 as _base64, json as _json
 
-def _xhr_fetch(scheme, host, port, method, path, headers, body):
-    port_default = 443 if scheme == 'https' else 80
-    show_port = f':{port}' if port and port != port_default else ''
-    full_url = f'{scheme}://{host}{show_port}{path}'
-    enc = _up.quote(full_url, safe='')
-    proxy_url = _CF_BASE_PY + enc + _CF_KEY_PY
-    print(f'[http-patch] XHR {method} {scheme}://{host}{show_port}{path[:60]}')
-    xhr = js.XMLHttpRequest.new()
-    xhr.open(method, proxy_url, False)
-    xhr.overrideMimeType('text/plain; charset=x-user-defined')
-    for k, v in (headers or {}).items():
-        try: xhr.setRequestHeader(str(k), str(v))
+# ══════════════════════════════════════════════════════════════════════════════
+# FIX STDOUT/STDERR  — Pyodide usa latin-1 di default; yt-dlp scrive Unicode
+# ══════════════════════════════════════════════════════════════════════════════
+class _SafeWriter:
+    """Wrapper che intercetta ogni write() e converte in UTF-8 con replace."""
+    def __init__(self, inner):
+        self._inner   = inner
+        self.encoding = 'utf-8'
+        self.errors   = 'replace'
+        self.softspace = 0
+    def write(self, s):
+        if not isinstance(s, str):
+            try: s = s.decode('utf-8', errors='replace')
+            except: s = repr(s)
+        # Forza a bytes UTF-8 e ritorna come stringa pulita
+        safe = s.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+        try:
+            return self._inner.write(safe)
+        except (UnicodeEncodeError, UnicodeDecodeError, UnicodeTranslateError):
+            ascii_s = safe.encode('ascii', errors='replace').decode('ascii')
+            try: return self._inner.write(ascii_s)
+            except: return len(s)
+    def flush(self):
+        try: self._inner.flush()
         except: pass
-    if body:
-        xhr.send(body if isinstance(body, (bytes, bytearray)) else str(body))
+    def fileno(self):
+        try: return self._inner.fileno()
+        except: return -1
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+try:
+    if not isinstance(sys.stdout, _SafeWriter):
+        sys.stdout = _SafeWriter(sys.stdout)
+    if not isinstance(sys.stderr, _SafeWriter):
+        sys.stderr = _SafeWriter(sys.stderr)
+except Exception as _e:
+    pass  # mai bloccare qui
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HEADER VIETATI  — XHR rifiuta silenziosamente questi header
+# ══════════════════════════════════════════════════════════════════════════════
+_FORBIDDEN_HEADERS = frozenset({
+    'accept-charset', 'accept-encoding', 'access-control-request-headers',
+    'access-control-request-method', 'connection', 'content-length', 'cookie',
+    'cookie2', 'date', 'dnt', 'expect', 'host', 'keep-alive', 'origin',
+    'referer', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'user-agent',
+    'via', 'warning',
+})
+
+def _safe_headers(headers):
+    """Rimuove header vietati dal browser prima di passarli a XHR."""
+    out = {}
+    for k, v in (headers or {}).items():
+        kl = k.lower()
+        if kl in _FORBIDDEN_HEADERS: continue
+        if kl.startswith(('proxy-', 'sec-')): continue
+        out[k] = v
+    return out
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DECODIFICA BODY  — x-user-defined mappa 0x80-0xFF → U+F780-U+F7FF
+#                    ord(c) & 0xFF recupera il byte originale in tutti i casi
+# ══════════════════════════════════════════════════════════════════════════════
+def _responsetext_to_bytes(text):
+    if not text:
+        return b''
+    try:
+        # Caso normale: x-user-defined → & 0xFF sempre da 0-255, nessun errore
+        return bytes(ord(c) & 0xFF for c in text)
+    except TypeError:
+        # text è ancora un JsProxy non convertito: forza str()
+        return bytes(ord(c) & 0xFF for c in str(text))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DECOMPRESSIONE  — il CF Worker può passare gzip/deflate tal quale
+# ══════════════════════════════════════════════════════════════════════════════
+def _decompress_body(data, content_encoding):
+    enc = (content_encoding or '').lower().strip()
+    if not enc or not data:
+        return data, False
+    try:
+        if enc in ('gzip', 'x-gzip'):
+            return _gzip.decompress(data), True
+        if enc == 'deflate':
+            try:
+                return _zlib.decompress(data), True
+            except _zlib.error:
+                return _zlib.decompress(data, -15), True  # deflate raw
+        if enc == 'br':
+            pass  # brotli non disponibile in WASM base; lascia passare
+    except Exception as _ex:
+        print(f'[http-patch] decompressione {enc!r} fallita: {_ex}')
+    return data, False
+
+# ══════════════════════════════════════════════════════════════════════════════
+# _ProxyResponse  — contenitore dati già deserializzati dal proxy JSON+base64
+# ══════════════════════════════════════════════════════════════════════════════
+class _ProxyResponse:
+    __slots__ = ('status', 'reason', 'headers_dict', 'body_bytes', 'url')
+    def __init__(self, status, reason, headers_dict, body_bytes, url):
+        self.status      = int(status or 200)
+        self.reason      = str(reason or 'OK')
+        self.headers_dict = dict(headers_dict or {})
+        self.body_bytes  = bytes(body_bytes or b'')
+        self.url         = url
+
+# ══════════════════════════════════════════════════════════════════════════════
+# XHR FETCH  — unico punto dove si effettua la richiesta HTTP via JS
+#
+# STRATEGIA (resistente a tutti i problemi di encoding):
+#   • Richiede al CF Worker fmt=b64 → il worker restituisce JSON puro ASCII:
+#       { "status": 200, "statusText": "OK",
+#         "headers": { ... },
+#         "body": "<base64 del body grezzo decompresso>" }
+#   • Python fa json.loads() + base64.b64decode() → bytes puri, nessun problema
+#     di codec, nessuna questione con x-user-defined o latin-1.
+#   • Fallback a x-user-defined + ord(c)&0xFF se il JSON fallisce.
+# ══════════════════════════════════════════════════════════════════════════════
+def _xhr_fetch(scheme, host, port, method, path, headers, body):
+    port_def  = 443 if scheme == 'https' else 80
+    show_port = f':{port}' if port and port != port_def else ''
+    full_url  = f'{scheme}://{host}{show_port}{path}'
+    # &fmt=b64 → worker restituisce JSON+base64, puramente ASCII, zero encode issues
+    proxy_url = _CF_BASE_PY + _up.quote(full_url, safe='') + _CF_KEY_PY + '&fmt=b64'
+    print(f'[http-patch] XHR {method} {full_url[:100]}')
+
+    xhr = js.XMLHttpRequest.new()
+    xhr.open(method, proxy_url, False)  # False = sincrono
+    # NESSUN overrideMimeType: la risposta è già JSON ASCII puro
+
+    # Invia solo gli header sicuri (i vietati dal browser vengono saltati)
+    for k, v in _safe_headers(headers).items():
+        try:
+            xhr.setRequestHeader(str(k), str(v))
+        except Exception:
+            pass  # header rifiutato dal browser → continua senza eccezione
+
+    # Body
+    if body is not None:
+        if isinstance(body, (bytes, bytearray)):
+            try:
+                xhr.send(js.Uint8Array.new(body))
+            except Exception:
+                xhr.send(bytes(body).decode('latin-1', errors='replace'))
+        else:
+            xhr.send(str(body))
     else:
         xhr.send()
-    return xhr
 
-class _XHRResponse:
-    def __init__(self, xhr, url):
-        self.status = xhr.status
-        self.reason = xhr.statusText or ''
-        self.version = 11
-        self.will_close = True
-        self._url    = url
-        self._data   = io.BytesIO(bytes(ord(c) & 0xFF for c in (xhr.responseText or '')))
+    if xhr.status == 0:
+        raise OSError(f'XHR network error (status=0) per {full_url[:80]}'
+                      ' — verifica CORS / CF Worker')
+
+    raw_text = str(xhr.responseText or '')
+
+    # ── Percorso principale: JSON + base64 ──────────────────────────────────
+    try:
+        payload = _json.loads(raw_text)
+        b64_body = payload.get('body', '')
+        body_bytes = _base64.b64decode(b64_body) if b64_body else b''
+        return _ProxyResponse(
+            status      = payload.get('status', xhr.status),
+            reason      = payload.get('statusText', ''),
+            headers_dict= payload.get('headers', {}),
+            body_bytes  = body_bytes,
+            url         = path,
+        )
+    except Exception as _e:
+        print(f'[http-patch] JSON/base64 fallito ({_e}), fallback x-user-defined')
+
+    # ── Fallback: x-user-defined + ord(c)&0xFF ──────────────────────────────
+    # Dobbiamo riaprire la richiesta senza fmt=b64
+    proxy_url_plain = _CF_BASE_PY + _up.quote(full_url, safe='') + _CF_KEY_PY
+    xhr2 = js.XMLHttpRequest.new()
+    xhr2.open(method, proxy_url_plain, False)
+    xhr2.overrideMimeType('text/plain; charset=x-user-defined')
+    for k, v in _safe_headers(headers).items():
+        try: xhr2.setRequestHeader(str(k), str(v))
+        except Exception: pass
+    if body is not None:
+        if isinstance(body, (bytes, bytearray)):
+            try: xhr2.send(js.Uint8Array.new(body))
+            except Exception: xhr2.send(bytes(body).decode('latin-1', errors='replace'))
+        else:
+            xhr2.send(str(body))
+    else:
+        xhr2.send()
+
+    fb_text = str(xhr2.responseText or '')
+    fb_bytes = bytes(ord(c) & 0xFF for c in fb_text)
+
+    # Costruisci headers dal fallback XHR
+    hdr_dict = {}
+    for line in str(xhr2.getAllResponseHeaders() or '').strip().splitlines():
+        if ':' in line:
+            k2, _, v2 = line.partition(':')
+            k2s, v2s = k2.strip().lower(), v2.strip()
+            if k2s: hdr_dict[k2s] = v2s
+
+    return _ProxyResponse(
+        status      = int(xhr2.status or 200),
+        reason      = str(xhr2.statusText or 'OK'),
+        headers_dict= hdr_dict,
+        body_bytes  = fb_bytes,
+        url         = path,
+    )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# _XHRResponse  — simula http.client.HTTPResponse
+#
+# EREDITA da io.RawIOBase per compatibilità con:
+#   - io.BufferedReader(r)  usato da alcune versioni di urllib
+#   - socket.SocketIO(r)    usato come fallback da urllib
+#   - addinfourl(r, ...)    wrapped direttamente
+# ══════════════════════════════════════════════════════════════════════════════
+class _XHRResponse(io.RawIOBase):
+    def __init__(self, proxy_resp, url):
+        super().__init__()
+        self._url        = url
+        self.debuglevel  = 0
+        self.version     = 11
+        self.will_close  = True
+        self.chunked     = False
+
+        # Status
+        self.status  = proxy_resp.status
+        self.reason  = proxy_resp.reason
+
+        # ── Parsing headers ──────────────────────────────────────────────
         self.msg = email.message.Message()
-        for line in (xhr.getAllResponseHeaders() or '').strip().splitlines():
-            if ':' in line:
-                k, v = line.split(':', 1)
-                self.msg[k.strip()] = v.strip()
-    def read(self, amt=None):   return self._data.read(amt)
-    def readline(self):         return self._data.readline()
+        for k, v in (proxy_resp.headers_dict or {}).items():
+            ks, vs = str(k).strip(), str(v).strip()
+            if ks:
+                try:
+                    self.msg[ks] = vs
+                except Exception:
+                    pass
+        self.headers = self.msg  # alias atteso da alcune versioni di urllib/yt-dlp
+
+        # ── Body: già bytes puri, nessun problema di encoding ────────────
+        raw = proxy_resp.body_bytes
+
+        # ── Decompressione se Content-Encoding presente ──────────────────
+        # (il CF Worker in modalità b64 NON manda Accept-Encoding → di solito
+        #  YouTube non comprime. Ma se il worker passasse gzip, lo gestiamo.)
+        content_enc = self.msg.get('content-encoding', '')
+        if content_enc:
+            raw, did_decompress = _decompress_body(raw, content_enc)
+            if did_decompress:
+                del self.msg['content-encoding']
+                if 'content-length' in self.msg:
+                    del self.msg['content-length']
+
+        self._data  = io.BytesIO(raw)
+        self.length = len(raw)
+
+    # ── io.RawIOBase  (OBBLIGATORIO per io.BufferedReader) ───────────────
     def readinto(self, buf):
-        chunk = self._data.read(len(buf)); buf[:len(chunk)] = chunk; return len(chunk)
-    def getheader(self, name, default=None): return self.msg.get(name, default)
-    def getheaders(self):       return list(self.msg.items())
-    def isclosed(self):         return False
+        chunk = self._data.read(len(buf))
+        n = len(chunk)
+        if n:
+            buf[:n] = chunk
+        return n
+
+    def readable(self):  return True
+    def writable(self):  return False
+    def seekable(self):  return False
+
+    # ── Metodi read standard ─────────────────────────────────────────────
+    def read(self, amt=None):
+        if amt is None or amt < 0:
+            return self._data.read()
+        return self._data.read(amt)
+
+    def read1(self, amt=-1):
+        return self.read(None if amt < 0 else amt)
+
+    def readline(self, size=-1):
+        return self._data.readline(-1 if size is None else size)
+
+    def readlines(self, hint=-1):
+        return self._data.readlines(hint)
+
+    def peek(self, n=0):
+        pos = self._data.tell()
+        data = self._data.read(max(n, 256))
+        self._data.seek(pos)
+        return data
+
+    # ── Metodi socket-like  (per socket.SocketIO compatibility) ──────────
+    def recv(self, n):          return self.read(n)
+    def recv_into(self, buf):   return self.readinto(buf)
+    def gettimeout(self):       return None
+    def settimeout(self, t):    pass
+    def makefile(self, *a, **kw): return self
+
+    # Pyodide/socket.SocketIO accede a _io_refs
+    _io_refs = 0
+
+    # ── Metodi http.client.HTTPResponse ──────────────────────────────────
+    def begin(self):            pass
+    def isclosed(self):         return self.closed
     def fileno(self):           return -1
     def flush(self):            pass
-    def close(self):            pass
-    def readable(self):         return True
+    def close(self):
+        self._data.close()
+        super().close()
+    def getheader(self, name, default=None):
+        return self.msg.get(name, default)
+    def getheaders(self):
+        return list(self.msg.items())
+    def info(self):             return self.msg
+    def geturl(self):           return self._url
+    def __iter__(self):
+        while True:
+            line = self.readline()
+            if not line:
+                break
+            yield line
+    def __enter__(self):        return self
+    def __exit__(self, *a):     self.close()
 
+# ══════════════════════════════════════════════════════════════════════════════
+# _XHRConnection / _XHRSConnection  — simulano http.client.HTTPConnection
+# ══════════════════════════════════════════════════════════════════════════════
 class _XHRConnection:
     _scheme = 'http'
     def __init__(self, host, port=None, timeout=30, **kw):
-        self.host    = host
-        self.port    = port
-        self.timeout = timeout
+        self.host     = host
+        self.port     = port
+        self.timeout  = timeout
         self._method  = 'GET'
         self._path    = '/'
         self._headers = {}
@@ -643,18 +925,22 @@ class _XHRConnection:
         self._headers = dict(headers)
         self._body    = body
     def getresponse(self):
-        xhr = _xhr_fetch(self._scheme, self.host, self.port,
-                         self._method, self._path, self._headers, self._body)
-        return _XHRResponse(xhr, self._path)
-    def set_debuglevel(self, *a): pass
-    def connect(self):            pass
-    def close(self):              pass
-    def set_tunnel(self, *a, **kw): pass
+        proxy_resp = _xhr_fetch(self._scheme, self.host, self.port,
+                                self._method, self._path, self._headers, self._body)
+        return _XHRResponse(proxy_resp, self._path)
+    def set_debuglevel(self, *a):         pass
+    def connect(self):                    pass
+    def close(self):                      pass
+    def set_tunnel(self, *a, **kw):       pass
     def putrequest(self, method, url, **kw):
         self._method = method; self._path = url
-    def putheader(self, key, val): self._headers[key] = val
-    def endheaders(self, body=None): self._body = body
-    def send(self, data):          self._body = data
+    def putheader(self, key, val):        self._headers[key] = val
+    def endheaders(self, body=None, *, encode_chunked=False):
+        if body is not None:
+            self._body = body
+    def send(self, data):                 self._body = data
+    @property
+    def sock(self):                       return None
 
 class _XHRSConnection(_XHRConnection):
     _scheme = 'https'
@@ -663,7 +949,7 @@ class _XHRSConnection(_XHRConnection):
 
 _hc.HTTPConnection  = _XHRConnection
 _hc.HTTPSConnection = _XHRSConnection
-print('[http-patch] OK — http.client.HTTPConnection/HTTPSConnection sostituiti con XHR via CF Worker')
+print('[http-patch] OK — XHRConnection installata, stdout/stderr UTF-8 safe')
 `);
 
     _ytdlpReady = true;   // <-- JS, non Python!
