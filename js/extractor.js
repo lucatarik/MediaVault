@@ -609,7 +609,7 @@ class _XHRResponse:
         self.version = 11
         self.will_close = True
         self._url    = url
-        self._data   = io.BytesIO((xhr.responseText or '').encode('latin-1'))
+        self._data   = io.BytesIO(bytes(ord(c) & 0xFF for c in (xhr.responseText or '')))
         self.msg = email.message.Message()
         for line in (xhr.getAllResponseHeaders() or '').strip().splitlines():
             if ':' in line:
