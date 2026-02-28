@@ -813,10 +813,6 @@ class _XHRResponse(io.RawIOBase):
         self.reason  = proxy_resp.reason
 
         # ── Parsing headers con http.client.parse_headers ────────────────
-        # NOTA: siamo dentro un JS template literal, quindi \r\n nell'f-string
-        # viene interpretato da JS come CR+LF prima di arrivare a Python →
-        # SyntaxError "unterminated f-string". Costruiamo il BytesIO direttamente
-        # senza f-string multiriga con sequenze di escape.
         try:
             CRLF = b'\r\n'
             buf = io.BytesIO()
