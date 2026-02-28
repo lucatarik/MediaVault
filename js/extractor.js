@@ -1019,7 +1019,7 @@ import yt_dlp, json, sys
 print(f'[yt-dlp] === ESTRAZIONE === url={_target_url} quality={_quality}p')
 _opts = {
     'quiet': False, 'no_warnings': False,
-    'format': f'bestvideo[height<={_quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<={_quality}]/best',
+    'format': f'best[height<={_quality}][ext=mp4]/best[height<={_quality}]/best',
     'noplaylist': True, 'socket_timeout': 20, 'extractor_retries': 2,
     'extractor_args': {'youtube': {'client': ['android', 'ios']}}
 }
