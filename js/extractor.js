@@ -813,20 +813,23 @@ class _XHRResponse(io.RawIOBase):
         self.reason  = proxy_resp.reason
 
         # ── Parsing headers con http.client.parse_headers ────────────────
-        # OBBLIGATORIO: usare HTTPMessage (non email.message.Message) perché
-        # è il tipo esatto che http.client.HTTPResponse.msg ha. yt-dlp e
-        # urllib leggono .get_all(), .get_all_values() ecc. su di esso.
-        # urllib inoltre sovrascrive .msg con la reason string dopo do_open()
-        # (resp.msg = r.reason) — per questo .headers e .msg sono SEPARATI:
-        #   .headers = HTTPMessage (il vero oggetto headers, MAI toccato da urllib)
-        #   .msg     = string (sovrascrivibile da urllib liberamente)
+        # NOTA: siamo dentro un JS template literal, quindi \r\n nell'f-string
+        # viene interpretato da JS come CR+LF prima di arrivare a Python →
+        # SyntaxError "unterminated f-string". Costruiamo il BytesIO direttamente
+        # senza f-string multiriga con sequenze di escape.
         try:
-            hdr_lines = ''.join(
-                f'{str(k).strip()}: {str(v).strip()}\r\n'
-                for k, v in (proxy_resp.headers_dict or {}).items()
-                if str(k).strip()
-            ) + '\r\n'
-            self.headers = _hc.parse_headers(io.BytesIO(hdr_lines.encode('iso-8859-1', errors='replace')))
+            CRLF = b'\r\n'
+            buf = io.BytesIO()
+            for k, v in (proxy_resp.headers_dict or {}).items():
+                ks = str(k).strip()
+                vs = str(v).strip()
+                if ks:
+                    line = (ks + ': ' + vs).encode('iso-8859-1', errors='replace')
+                    buf.write(line)
+                    buf.write(CRLF)
+            buf.write(CRLF)  # riga vuota finale richiesta da parse_headers
+            buf.seek(0)
+            self.headers = _hc.parse_headers(buf)
         except Exception:
             # Fallback: costruisci a mano un HTTPMessage
             self.headers = _hc.HTTPMessage()
