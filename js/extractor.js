@@ -814,7 +814,7 @@ class _XHRResponse(io.RawIOBase):
 
         # ── Parsing headers con http.client.parse_headers ────────────────
         try:
-            CRLF = b"\r\n"
+            CRLF = bytes([13, 10])
             buf = io.BytesIO()
             for k, v in (proxy_resp.headers_dict or {}).items():
                 ks = str(k).strip()
