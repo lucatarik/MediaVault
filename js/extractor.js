@@ -996,7 +996,7 @@ print('[http-patch] OK — XHRConnection installata, stdout/stderr UTF-8 safe')
     return _pyodide;
   }
 
-  async function extractWithYtDlp(url, quality = '720', onProgress) {
+  async function extractWithYtDlp(url, quality = '480', onProgress) {
     const FN = 'extractWithYtDlp';
     G(FN, `yt-dlp WASM: ${url} [${quality}p]`);
     L(FN, `LOGICA: Python WASM nel browser. yt-dlp.extract_info(download=False) → URL CDN → CF Worker relay`);
@@ -1019,7 +1019,7 @@ import yt_dlp, json, sys
 print(f'[yt-dlp] === ESTRAZIONE === url={_target_url} quality={_quality}p')
 _opts = {
     'quiet': False, 'no_warnings': False,
-    'format': f'bestvideo[height<={_quality}]+bestaudio/best[height<={_quality}]/best',
+    'format': f'bestvideo[height<={_quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<={_quality}]/best',
     'noplaylist': True, 'socket_timeout': 20, 'extractor_retries': 2,
     'extractor_args': {'youtube': {'client': ['android', 'ios']}}
 }
