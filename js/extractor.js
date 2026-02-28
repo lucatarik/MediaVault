@@ -623,7 +623,8 @@ except Exception as _e:
     pass  # mai bloccare qui
 
 # ══════════════════════════════════════════════════════════════════════════════
-# HEADER VIETATI  — XHR rifiuta silenziosamente questi header
+# HEADER TUNNELING  — Il browser vieta di modificare User-Agent, Referer, ecc.
+# Li passiamo al CF Worker mascherati con "X-Ytdlp-".
 # ══════════════════════════════════════════════════════════════════════════════
 _FORBIDDEN_HEADERS = frozenset({
     'accept-charset', 'accept-encoding', 'access-control-request-headers',
@@ -634,13 +635,20 @@ _FORBIDDEN_HEADERS = frozenset({
 })
 
 def _safe_headers(headers):
-    """Rimuove header vietati dal browser prima di passarli a XHR."""
     out = {}
+    # 1. Mimetizzazione di base: forniamo sempre un User-Agent e un Accept-Language credibili
+    out['X-Ytdlp-User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+    out['Accept-Language'] = 'en-US,en;q=0.9,it;q=0.8'
+    out['Sec-Fetch-Mode'] = 'navigate'
+
+    # 2. Mascheriamo gli header di yt-dlp per bypassare i blocchi di XHR
     for k, v in (headers or {}).items():
         kl = k.lower()
-        if kl in _FORBIDDEN_HEADERS: continue
-        if kl.startswith(('proxy-', 'sec-')): continue
-        out[k] = v
+        if kl in _FORBIDDEN_HEADERS or kl.startswith(('proxy-', 'sec-')):
+            # Diventa ad esempio: X-Ytdlp-user-agent
+            out['X-Ytdlp-' + k] = v
+        else:
+            out[k] = v
     return out
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1012,7 +1020,8 @@ print(f'[yt-dlp] === ESTRAZIONE === url={_target_url} quality={_quality}p')
 _opts = {
     'quiet': False, 'no_warnings': False,
     'format': f'bestvideo[height<={_quality}]+bestaudio/best[height<={_quality}]/best',
-    'noplaylist': True, 'socket_timeout': 20, 'extractor_retries': 2
+    'noplaylist': True, 'socket_timeout': 20, 'extractor_retries': 2,
+    'extractor_args': {'youtube': {'client': ['android', 'ios']}}
 }
 print(f'[yt-dlp] opts={_opts}')
 _res = None
