@@ -1035,10 +1035,10 @@ try:
     for f in reversed(formats):
         has_video = f.get('vcodec', 'none') != 'none'
         has_audio = f.get('acodec', 'none') != 'none'
+        print(f)
         if f.get('url') and has_video and has_audio:
-            if f.get('height', 0) <= int(_quality):
-                best = f
-                break
+            best = f
+            break
 
     # Fallback estremo: se non troviamo nulla con audio, prendiamo il "best" assoluto
     if not best and formats:
