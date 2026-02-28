@@ -1031,14 +1031,15 @@ try:
         info = ydl.extract_info(_target_url, download=False)
         formats = info.get('formats', [info])
         print(f'[yt-dlp] formati totali ricevuti: {len(formats)}')
+        
         best = None
         for f in reversed(formats):
             has_video = f.get('vcodec', 'none') != 'none'
             has_audio = f.get('acodec', 'none') != 'none'
-            print(f)
-        if f.get('url') and has_video and has_audio:
-            best = f
-            break
+            print(f'[yt-dlp] formato: id={f.get("format_id","?")} h={f.get("height","?")} vcodec={str(f.get("vcodec","none"))[:15]} url={bool(f.get("url"))}')
+            if f.get('url') and has_video and has_audio:
+                best = f
+                break
         # Fallback estremo: se non troviamo nulla con audio, prendiamo il "best" assoluto
         if not best and formats:
             best = formats[-1]
