@@ -938,6 +938,7 @@ class _XHRResponse(io.RawIOBase):
 # ══════════════════════════════════════════════════════════════════════════════
 class _XHRConnection:
     _scheme = 'http'
+    _get_content_length = lambda self, *a: None
     def __init__(self, host, port=None, timeout=30, **kw):
         self.host     = host
         self.port     = port
