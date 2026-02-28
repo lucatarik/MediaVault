@@ -812,38 +812,45 @@ class _XHRResponse(io.RawIOBase):
         self.status  = proxy_resp.status
         self.reason  = proxy_resp.reason
 
-        # ── Parsing headers ──────────────────────────────────────────────
-        self.msg = email.message.Message()
-        for k, v in (proxy_resp.headers_dict or {}).items():
-            ks, vs = str(k).strip(), str(v).strip()
-            if ks:
-                try:
-                    self.msg[ks] = vs
-                except Exception:
-                    pass
-        self.headers = self.msg  # alias atteso da alcune versioni di urllib/yt-dlp
+        # ── Parsing headers con http.client.parse_headers ────────────────
+        # OBBLIGATORIO: usare HTTPMessage (non email.message.Message) perché
+        # è il tipo esatto che http.client.HTTPResponse.msg ha. yt-dlp e
+        # urllib leggono .get_all(), .get_all_values() ecc. su di esso.
+        # urllib inoltre sovrascrive .msg con la reason string dopo do_open()
+        # (resp.msg = r.reason) — per questo .headers e .msg sono SEPARATI:
+        #   .headers = HTTPMessage (il vero oggetto headers, MAI toccato da urllib)
+        #   .msg     = string (sovrascrivibile da urllib liberamente)
+        try:
+            hdr_lines = ''.join(
+                f'{str(k).strip()}: {str(v).strip()}\r\n'
+                for k, v in (proxy_resp.headers_dict or {}).items()
+                if str(k).strip()
+            ) + '\r\n'
+            self.headers = _hc.parse_headers(io.BytesIO(hdr_lines.encode('iso-8859-1', errors='replace')))
+        except Exception:
+            # Fallback: costruisci a mano un HTTPMessage
+            self.headers = _hc.HTTPMessage()
+            for k, v in (proxy_resp.headers_dict or {}).items():
+                ks, vs = str(k).strip(), str(v).strip()
+                if ks:
+                    try: self.headers[ks] = vs
+                    except Exception: pass
 
-        # Aggiungi get_all() a email.message.Message se mancante
-        # (yt-dlp chiama headers.get_all('set-cookie', []) per i cookie)
-        if not hasattr(self.msg, 'get_all'):
-            def _get_all(name, failobj=None):
-                vals = self.msg.get_all(name) if hasattr(email.message.Message, 'get_all') else None
-                return vals if vals is not None else (failobj if failobj is not None else [])
-            self.msg.get_all = _get_all
+        # .msg è l'alias che urllib sovrascrive con la reason string.
+        # Lo inizializziamo vuoto (string) per non rompere codice che lo legge.
+        self.msg = proxy_resp.reason  # urllib farà: resp.msg = r.reason
 
         # ── Body: già bytes puri, nessun problema di encoding ────────────
         raw = proxy_resp.body_bytes
 
         # ── Decompressione se Content-Encoding presente ──────────────────
-        # (il CF Worker in modalità b64 NON manda Accept-Encoding → di solito
-        #  YouTube non comprime. Ma se il worker passasse gzip, lo gestiamo.)
-        content_enc = self.msg.get('content-encoding', '')
+        content_enc = self.headers.get('content-encoding', '')
         if content_enc:
             raw, did_decompress = _decompress_body(raw, content_enc)
             if did_decompress:
-                del self.msg['content-encoding']
-                if 'content-length' in self.msg:
-                    del self.msg['content-length']
+                del self.headers['content-encoding']
+                if 'content-length' in self.headers:
+                    del self.headers['content-length']
 
         self._data  = io.BytesIO(raw)
         self.length = len(raw)
@@ -905,10 +912,10 @@ class _XHRResponse(io.RawIOBase):
         self._data.close()
         super().close()
     def getheader(self, name, default=None):
-        return self.msg.get(name, default)
+        return self.headers.get(name, default)
     def getheaders(self):
-        return list(self.msg.items())
-    def info(self):             return self.msg
+        return list(self.headers.items())
+    def info(self):             return self.headers
     def geturl(self):           return self._url
     def __iter__(self):
         while True:
@@ -925,7 +932,7 @@ class _XHRResponse(io.RawIOBase):
     # senza setter — esplode con "property has no setter".
     # Li impostiamo nel __init__ come normali attributi di istanza.
     def getcode(self):           return self.status          # metodo legacy urllib
-    def get_header(self, h, d=None): return self.msg.get(h, d)  # yt-dlp usa questo
+    def get_header(self, h, d=None): return self.headers.get(h, d)  # yt-dlp usa questo
 
 # ══════════════════════════════════════════════════════════════════════════════
 # _XHRConnection / _XHRSConnection  — simulano http.client.HTTPConnection
