@@ -823,6 +823,14 @@ class _XHRResponse(io.RawIOBase):
                     pass
         self.headers = self.msg  # alias atteso da alcune versioni di urllib/yt-dlp
 
+        # Aggiungi get_all() a email.message.Message se mancante
+        # (yt-dlp chiama headers.get_all('set-cookie', []) per i cookie)
+        if not hasattr(self.msg, 'get_all'):
+            def _get_all(name, failobj=None):
+                vals = self.msg.get_all(name) if hasattr(email.message.Message, 'get_all') else None
+                return vals if vals is not None else (failobj if failobj is not None else [])
+            self.msg.get_all = _get_all
+
         # ── Body: già bytes puri, nessun problema di encoding ────────────
         raw = proxy_resp.body_bytes
 
@@ -905,6 +913,22 @@ class _XHRResponse(io.RawIOBase):
             yield line
     def __enter__(self):        return self
     def __exit__(self, *a):     self.close()
+
+    # ── Attributi/metodi attesi da urllib.response.addinfourl ────────────
+    # urllib wrappa la risposta in addinfourl ma yt-dlp a volte usa la
+    # risposta nuda, quindi tutti gli alias devono essere presenti qui.
+    @property
+    def code(self):              return self.status          # urllib legacy
+    @property
+    def url(self):               return self._url
+    @property
+    def fp(self):                return self._data           # file-like pointer
+    def getcode(self):           return self.status          # metodo legacy urllib
+    def get_header(self, h, d=None): return self.msg.get(h, d)  # yt-dlp usa questo
+    # http.client.HTTPResponse espone anche .msg come HTTPMessage alias di headers;
+    # già impostato in __init__ come self.headers = self.msg, aggiungiamo anche
+    # l'accesso diretto .msg che yt-dlp legge per parsing headers:
+    # (msg è già definito in __init__ come email.message.Message — OK)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # _XHRConnection / _XHRSConnection  — simulano http.client.HTTPConnection
