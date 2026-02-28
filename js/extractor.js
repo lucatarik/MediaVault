@@ -592,7 +592,7 @@ def _xhr_fetch(scheme, host, port, method, path, headers, body):
     print(f'[http-patch] XHR {method} {scheme}://{host}{show_port}{path[:60]}')
     xhr = js.XMLHttpRequest.new()
     xhr.open(method, proxy_url, False)
-    xhr.responseType = 'arraybuffer'
+    xhr.overrideMimeType('text/plain; charset=x-user-defined')
     for k, v in (headers or {}).items():
         try: xhr.setRequestHeader(str(k), str(v))
         except: pass
@@ -609,7 +609,7 @@ class _XHRResponse:
         self.version = 11
         self.will_close = True
         self._url    = url
-        self._data   = io.BytesIO(bytes(js.Uint8Array.new(xhr.response).to_py()))
+        self._data   = io.BytesIO((xhr.responseText or '').encode('latin-1'))
         self.msg = email.message.Message()
         for line in (xhr.getAllResponseHeaders() or '').strip().splitlines():
             if ':' in line:
