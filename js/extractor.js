@@ -848,6 +848,11 @@ class _XHRResponse(io.RawIOBase):
         self._data  = io.BytesIO(raw)
         self.length = len(raw)
 
+        # ── Attributi di istanza scrivibili (urllib li sovrascrive dopo init) ──
+        self.code = self.status   # urllib.response.addinfourl accede a .code
+        self.url  = self._url     # urllib sovrascrive con l'URL finale dopo redirect
+        self.fp   = self._data    # urllib accede a .fp come file-pointer
+
     # ── io.RawIOBase  (OBBLIGATORIO per io.BufferedReader) ───────────────
     def readinto(self, buf):
         chunk = self._data.read(len(buf))
@@ -915,20 +920,12 @@ class _XHRResponse(io.RawIOBase):
     def __exit__(self, *a):     self.close()
 
     # ── Attributi/metodi attesi da urllib.response.addinfourl ────────────
-    # urllib wrappa la risposta in addinfourl ma yt-dlp a volte usa la
-    # risposta nuda, quindi tutti gli alias devono essere presenti qui.
-    @property
-    def code(self):              return self.status          # urllib legacy
-    @property
-    def url(self):               return self._url
-    @property
-    def fp(self):                return self._data           # file-like pointer
+    # IMPORTANTE: urllib imposta .url, .code ecc. come attributi di istanza
+    # DOPO la costruzione (es: resp.url = final_url). NON usare @property
+    # senza setter — esplode con "property has no setter".
+    # Li impostiamo nel __init__ come normali attributi di istanza.
     def getcode(self):           return self.status          # metodo legacy urllib
     def get_header(self, h, d=None): return self.msg.get(h, d)  # yt-dlp usa questo
-    # http.client.HTTPResponse espone anche .msg come HTTPMessage alias di headers;
-    # già impostato in __init__ come self.headers = self.msg, aggiungiamo anche
-    # l'accesso diretto .msg che yt-dlp legge per parsing headers:
-    # (msg è già definito in __init__ come email.message.Message — OK)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # _XHRConnection / _XHRSConnection  — simulano http.client.HTTPConnection
