@@ -1032,17 +1032,16 @@ try:
         formats = info.get('formats', [info])
         print(f'[yt-dlp] formati totali ricevuti: {len(formats)}')
         best = None
-    for f in reversed(formats):
-        has_video = f.get('vcodec', 'none') != 'none'
-        has_audio = f.get('acodec', 'none') != 'none'
-        print(f)
+        for f in reversed(formats):
+            has_video = f.get('vcodec', 'none') != 'none'
+            has_audio = f.get('acodec', 'none') != 'none'
+            print(f)
         if f.get('url') and has_video and has_audio:
             best = f
             break
-
-    # Fallback estremo: se non troviamo nulla con audio, prendiamo il "best" assoluto
-    if not best and formats:
-        best = formats[-1]
+        # Fallback estremo: se non troviamo nulla con audio, prendiamo il "best" assoluto
+        if not best and formats:
+            best = formats[-1]
             print('[yt-dlp] Nessun formato con video → uso ultimo disponibile')
         if best:
             print(f'[yt-dlp] SCELTO: {best.get("height","?")}p ext={best.get("ext","?")} url={best.get("url","")[:80]}...')
