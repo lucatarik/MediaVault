@@ -1015,66 +1015,149 @@ print('[http-patch] OK — XHRConnection installata, stdout/stderr UTF-8 safe')
 
     try {
       const resultJson = await pyodide.runPythonAsync(`
-import yt_dlp, json, sys
+import yt_dlp, json, sys, re as _re
 print(f'[yt-dlp] === ESTRAZIONE === url={_target_url} quality={_quality}p')
+
+# ── Opzioni: NON usiamo il format selector di yt-dlp per la scelta finale
+# perché vogliamo logica custom (av1 skip, compatibilità browser).
+# Chiediamo tutti i formati e scegliamo noi.
 _opts = {
     'quiet': False, 'no_warnings': False,
-    'format': f'best[height<=?{_quality}][vcodec!=none][acodec!=none]/best',
+    'format': 'bestvideo*+bestaudio/best',   # scarica info su tutti i formati
     'noplaylist': True, 'socket_timeout': 20, 'extractor_retries': 2,
     'extractor_args': {'youtube': {'client': ['android', 'ios']}}
 }
-print(f'[yt-dlp] opts={_opts}')
 _res = None
 try:
     with yt_dlp.YoutubeDL(_opts) as ydl:
         print('[yt-dlp] Chiamo extract_info(download=False)...')
         info = ydl.extract_info(_target_url, download=False)
-        formats = info.get('formats', [info])
-        print(f'[yt-dlp] formati totali ricevuti: {len(formats)}')
-        
-        best = None
-        for f in reversed(formats):
-            has_video = str(f.get('vcodec', 'none')) != 'none'
-            has_audio = str(f.get('acodec', 'none')) != 'none'
-            height = f.get('height', 0) or 0
-            print(f'[yt-dlp] formato: id={f.get("format_id","?")} h={f.get("height","?")} vcodec={str(f.get("vcodec","none"))[:15]}  acodec={str(f.get("vcodec","none"))[:15]} url={bool(f.get("url"))}')
-            if f.get('url') and has_video and has_audio and height <= int(_quality):
-                best = f
-                break
-        # Fallback estremo: se non troviamo nulla con audio, prendiamo il "best" assoluto
-        if not best and formats:
-            best = formats[-1]
-            print('[yt-dlp] Nessun formato con video → uso ultimo disponibile')
+        formats = [f for f in info.get('formats', [info]) if f.get('url')]
+        print(f'[yt-dlp] formati con URL: {len(formats)}')
+
+        _q = int(_quality)
+
+        def _is_combined(f):
+            return (str(f.get('vcodec', 'none')).lower() not in ('none', '')) and \
+                   (str(f.get('acodec', 'none')).lower() not in ('none', ''))
+
+        def _is_h264_aac(f):
+            # h264 video + aac/mp4a audio = massima compatibilità su tutti i browser
+            vc = str(f.get('vcodec', '')).lower()
+            ac = str(f.get('acodec', '')).lower()
+            return ('avc' in vc or 'h264' in vc) and ('mp4a' in ac or 'aac' in ac)
+
+        def _has_bad_audio(f):
+            # av01 (AV1) come codec audio, o formati webm-only con opus:
+            # alcuni browser/device non decodificano il canale audio in questi container
+            ac = str(f.get('acodec', '')).lower()
+            vc = str(f.get('vcodec', '')).lower()
+            ext = str(f.get('ext', '')).lower()
+            # av01 come video con opus in webm = spesso niente audio su Safari/iOS
+            if 'av0' in vc and ext == 'webm':
+                return True
+            # acodec esplicitamente av1
+            if ac.startswith('av0') or ac == 'av1':
+                return True
+            return False
+
+        def _height(f):
+            return f.get('height') or 0
+
+        def _score(f):
+            h = _height(f)
+            combined  = _is_combined(f)
+            compat    = _is_h264_aac(f)
+            bad_audio = _has_bad_audio(f)
+            within_q  = (h > 0) and (h <= _q)
+            # Tuple confrontata lessicograficamente: valori alti = meglio
+            return (
+                1 if combined  else 0,   # MUST avere video+audio insieme
+                1 if within_q  else 0,   # MUST essere entro il limite di qualità
+                1 if compat    else 0,   # preferisci h264+aac
+                0 if bad_audio else 1,   # penalizza av1/webm-audio
+                h                        # più alto è meglio (a parità)
+            )
+
+        # ── Selezione principale: combined + entro il limite ───────────────
+        pool = [f for f in formats if _is_combined(f) and _height(f) > 0 and _height(f) <= _q]
+
+        # Fallback 1: combined a qualsiasi altezza (ignora limite)
+        if not pool:
+            print('[yt-dlp] Nessun combined entro la quality → fallback: combined qualsiasi')
+            pool = [f for f in formats if _is_combined(f)]
+
+        # Fallback 2: qualsiasi formato con URL
+        if not pool:
+            print('[yt-dlp] Nessun combined trovato → uso qualsiasi formato con URL')
+            pool = formats
+
+        pool.sort(key=_score, reverse=True)
+
+        for f in pool:
+            print(f'[yt-dlp] candidato: id={f.get("format_id","?")} h={_height(f)}p '
+                  f'vc={str(f.get("vcodec","none"))[:12]} ac={str(f.get("acodec","none"))[:12]} '
+                  f'ext={f.get("ext","?")} score={_score(f)}')
+
+        best = pool[0] if pool else None
         if best:
-            print(f'[yt-dlp] SCELTO: {best.get("height","?")}p ext={best.get("ext","?")} url={best.get("url","")[:80]}...')
+            print(f'[yt-dlp] SCELTO: {_height(best)}p ext={best.get("ext","?")} '
+                  f'vc={str(best.get("vcodec","none"))[:15]} ac={str(best.get("acodec","none"))[:15]}')
+
+        # ── Embed URL (YouTube) ────────────────────────────────────────────
+        embed_url = None
+        vid_id = info.get('id', '')
+        if vid_id and ('youtube' in info.get('extractor', '') or 'youtube' in _target_url):
+            embed_url = 'https://www.youtube.com/embed/' + vid_id + '?autoplay=1'
+
         _res = json.dumps({
-            'url': best.get('url') if best else info.get('url'),
-            'ext': (best or info).get('ext', 'mp4'),
-            'quality': str(best.get('height','?'))+'p' if best and best.get('height') else '?',
-            'title': info.get('title', '')
+            'url':      best.get('url') if best else info.get('url'),
+            'ext':      (best or info).get('ext', 'mp4'),
+            'quality':  str(_height(best)) + 'p' if best and _height(best) else '?',
+            'title':    info.get('title', ''),
+            'embedUrl': embed_url,
+            'bad_audio': _has_bad_audio(best) if best else False
         })
 except Exception as e:
     import traceback
     tb = traceback.format_exc()
     print(f'[yt-dlp] ERRORE: {e}', file=sys.stderr)
-    print(f'[yt-dlp] TRACEBACK:\\n{tb}', file=sys.stderr)
-    _res = json.dumps({'error': str(e), 'tb': tb[:500]})
-print(f'[yt-dlp] Risultato JSON: {_res[:200]}')
+    print(f'[yt-dlp] TRACEBACK:', file=sys.stderr)
+    print(tb, file=sys.stderr)
+    _res = json.dumps({'error': str(e), 'tb': tb[:800]})
+print(f'[yt-dlp] Risultato JSON: {_res[:300]}')
 _res
 `);
       const result = JSON.parse(resultJson);
       L(FN, `Risultato Python:`, result);
       if (result.error) { E(FN, `yt-dlp error: ${result.error}`); if(result.tb) E(FN, result.tb); GE(); return null; }
       if (!result.url)  { E(FN, 'Nessun URL nel risultato Python'); GE(); return null; }
+      if (result.bad_audio) E(FN, '⚠ Formato selezionato ha audio problematico (av1/webm) — considera embed');
       L(FN, `✓ URL estratto (${result.quality}): ${result.url.slice(0,100)}…`);
       L(FN, `CF Worker relay per CORS…`);
       const proxied = await proxyVideoUrl(result.url);
       L(FN, `URL finale: ${proxied?.slice(0,100)}…`);
-      GE(); return { url: proxied||result.url, quality: result.quality, needsProxy: true };
+      GE(); return {
+        url:       proxied || result.url,
+        quality:   result.quality,
+        needsProxy: true,
+        embedUrl:  result.embedUrl || null,
+        bad_audio: result.bad_audio || false,
+        title:     result.title || ''
+      };
     } catch(e) { E(FN, `Eccezione JS: ${e.message}`, e); GE(); return null; }
   }
 
-  // ─── ROUTER PRINCIPALE ────────────────────────────────────────────────────
+  // ─── EMBED URL HELPER ────────────────────────────────────────────────────
+  // Inietta embedUrl in ogni result prodotto da extract()
+  function _withEmbed(result, url, platform) {
+    if (!result) return result;
+    const eUrl = getEmbedUrl(url, platform);
+    if (eUrl) result.embedUrl = eUrl;
+    return result;
+  }
+
+
   const EMBED_ONLY  = ['spotify','twitch'];
 
   async function extract(url, platform, quality = '720', onProgress) {
@@ -1120,6 +1203,9 @@ _res
       result = await extractWithYtDlp(url, quality, onProgress);
     }
 
+    // Aggiungi embedUrl a tutti i risultati (usato da player e card per "Usa embed")
+    _withEmbed(result, url, platform);
+
     if (result) L(FN, `✓ ESTRAZIONE COMPLETATA:`, result);
     else        E(FN, `✗ TUTTI I METODI FALLITI per: ${url}`);
 
@@ -1135,7 +1221,37 @@ _res
 
   function getVxInstagramUrl(url) { return buildVxUrl(url); }
 
+  /**
+   * Restituisce l'URL embed per YouTube (e altri siti supportati).
+   * Usato sia dal player sia dalle card nel listing.
+   * @param {string} url  URL originale del video
+   * @param {string} [platform]
+   * @returns {string|null}
+   */
+  function getEmbedUrl(url, platform) {
+    // YouTube
+    const ytMatch = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|shorts\/|embed\/|v\/))([\w-]{11})/);
+    if (ytMatch) return `https://www.youtube.com/embed/${ytMatch[1]}?autoplay=1`;
+    // Vimeo
+    const vmMatch = url.match(/vimeo\.com\/(?:video\/)?(\d+)/);
+    if (vmMatch) return `https://player.vimeo.com/video/${vmMatch[1]}?autoplay=1`;
+    // Facebook video / reel / watch
+    if (/facebook\.com|fb\.watch/.test(url))
+      return `https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(url)}&autoplay=true&show_text=false&width=560`;
+    // Twitch clip (sia clips.twitch.tv/SLUG che twitch.tv/X/clip/SLUG)
+    const twClip = url.match(/(?:clips\.twitch\.tv\/|twitch\.tv\/\S+\/clip\/)([\w-]+)/);
+    if (twClip) return `https://clips.twitch.tv/embed?clip=${twClip[1]}&parent=${location.hostname}&autoplay=true`;
+    // Twitch channel
+    const twCh = url.match(/twitch\.tv\/([^\/\?#]+)(?:$|[\/\?#])/);
+    if (twCh && !['clip','videos','schedule','clips'].includes(twCh[1]))
+      return `https://player.twitch.tv/?channel=${twCh[1]}&parent=${location.hostname}&autoplay=true`;
+    // Spotify
+    const spMatch = url.match(/open\.spotify\.com\/(track|album|playlist|episode|show)\/([\w]+)/);
+    if (spMatch) return `https://open.spotify.com/embed/${spMatch[1]}/${spMatch[2]}`;
+    return null;
+  }
+
   L('init', '✓ Extractor pronto (CF Worker only — no corsproxy.io)');
-  return { extract, preloadPyodide, getVxInstagramUrl };
+  return { extract, preloadPyodide, getVxInstagramUrl, getEmbedUrl };
 
 })();
