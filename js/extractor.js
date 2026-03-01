@@ -1034,10 +1034,11 @@ try:
         
         best = None
         for f in reversed(formats):
-            has_video = f.get('vcodec', 'none') != 'none'
-            has_audio = f.get('acodec', 'none') != 'none'
+            has_video = str(f.get('vcodec', 'none')) != 'none'
+            has_audio = str(f.get('acodec', 'none')) != 'none'
+            height = f.get('height', 0) or 0
             print(f'[yt-dlp] formato: id={f.get("format_id","?")} h={f.get("height","?")} vcodec={str(f.get("vcodec","none"))[:15]}  acodec={str(f.get("vcodec","none"))[:15]} url={bool(f.get("url"))}')
-            if f.get('url') and has_video and has_audio:
+            if f.get('url') and has_video and has_audio and height <= int(_quality):
                 best = f
                 break
         # Fallback estremo: se non troviamo nulla con audio, prendiamo il "best" assoluto
