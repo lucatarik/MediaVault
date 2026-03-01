@@ -1036,7 +1036,7 @@ try:
         for f in reversed(formats):
             has_video = f.get('vcodec', 'none') != 'none'
             has_audio = f.get('acodec', 'none') != 'none'
-            print(f'[yt-dlp] formato: id={f.get("format_id","?")} h={f.get("height","?")} vcodec={str(f.get("vcodec","none"))[:15]} url={bool(f.get("url"))}')
+            print(f'[yt-dlp] formato: id={f.get("format_id","?")} h={f.get("height","?")} vcodec={str(f.get("vcodec","none"))[:15]}  acodec={str(f.get("vcodec","none"))[:15]} url={bool(f.get("url"))}')
             if f.get('url') and has_video and has_audio:
                 best = f
                 break
